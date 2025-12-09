@@ -1,0 +1,27 @@
+chains:
+  - id: 1
+    name: "ethereum"
+    rpc: "https://mainnet.infura.io/v3/YOUR_KEY"
+
+pools:
+  - id: "eth-usdc-05"
+    chain_id: 1
+    token0: "ETH"
+    token1: "USDC"
+    fee: 500
+    address: "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+    max_investment: "1000"
+
+strategy:
+  name: "basic_rebalance"
+  dry_run: true
+  params:
+    threshold: 0.05
+
+risk:
+  max_daily_gas: 50.0
+  max_drawdown: 0.10
+  consecutive_fails: 5
+
+monitoring:
+  port: 8080
