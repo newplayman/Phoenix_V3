@@ -1180,3 +1180,106 @@ const (
 ---
 
 如果你愿意，下一步我可以直接帮你把 **Phase 0–1 的 Go 项目骨架** 生成出来（包括 `main.go`、`config` 结构体、几个空接口和 TODO 注释），这样你可以直接拷到本地开干。
+
+---
+
+## 第六部分：全局改进方案与技术规范
+
+> 目标：把“场景 → 模块 → 数据契约”这一链路落到实处，并为后续 Phase 7/8 的实盘化奠定工程基础。
+
+### 6.1 数据契约与模块通信
+
+- 新增 `internal/contracts/` 包集中定义 Feed/DexState/Engine/Strategy/Intent/Gateway/Risk 的接口与结构体，所有模块只能依赖 contracts 包，禁止临时定义隐形字段。
+- `internal/events/` 现包含 `MemoryStream` 与 `RedisStream` 两种实现：内存模式适合本地开发，Redis 模式（via `events.driver=redis`）会将事件写入 Redis Streams 并通过消费组分发，可持久化与重放。
+- Feed、DexState 把标准化数据写入事件流，Engine/Strategy 通过订阅器读取，形成可重放的“世界状态”。目前行情侧已具备 Binance WS + CoinGecko REST 的多源汇聚（`internal/feed/aggregator.go`），按平均价输出统一事件，并在 `/healthz` 中展示每个源的状态。
+- Gateway/Adapter 已接入 Uniswap V3 PositionManager：策略会把 token/fee/tick 信息写入 Intent Metadata，`internal/chain/univ3/adapter.go` 根据这些字段构造 calldata，`internal/chain/gateway/eth_gateway.go` 读取 metadata（target、calldata、value）后签名发送交易，并轮询回执。近期已修复 Adapter 对 `uint24/int24`（fee/tick）字段的 ABI 映射，统一使用 `*big.Int` 打包，避免 IntentExecutor 在真实模式报 `abi: cannot use uint32 as type ptr as argument`。DryRun 仍可通过 metadata 生成真实 calldata，用于测试网调试。
+- `cmd/bot` 中新增 `startPoolWatcher`（定期拉取 Pool 状态并广播 `TopicPoolState`）与 `startIntentExecutor`（独立协程 + 简单节奏控制执行 Intent），逐步向文档描述的“调度器 + 风控”靠拢。
+- Intent 队列、Gateway 之间的通信统一使用 gRPC/JSON-RPC 协议（或在单体模式下使用 channel 包装），并把协议版本号写入消息头，方便灰度兼容。
+
+### 6.2 配置与版本治理
+
+- `AppConfig` 增加 `StrategyVersion`、`SchemaVersion` 字段，所有生成的 Intent、交易记录都写入版本号。
+- 配置文件仍放 `configs/*.yaml`，但运行时通过 Config Service（可用 etcd/Consul 或简单 HTTP 服务）下发，并支持热更新；核心配置变更需双人审批。
+- 已提供 `config.NewManager`（基于 fsnotify 的文件热重载）与 `ValidateConfig` 校验逻辑，运行时可订阅配置变更事件更新策略和风控参数；未来接入远程配置中心时只需替换 Manager 的实现。
+- 新增 `cmd/configcheck` 工具，可在 CI 或本地执行 `go run ./cmd/configcheck -config configs/config.yaml`，确保配置遵守 schema 与约束。
+- 示例配置已切换到 Goerli（`chains[].rpc`），池子字段可直接写入 Token 地址、PositionManager、LP Amount；私钥通过 `BOT_PRIVATE_KEY` 环境变量注入，避免写入仓库。
+- 在 CI 中引入 `cue` 或 JSON Schema 校验工具，对配置进行结构校验；`configs/` 目录通过 GitOps 审核，禁止在业务代码里写死常量。
+
+### 6.3 存储与审计体系
+
+- 存储层拆成三层：
+  - 实时缓存：Redis Streams 存放最近 N 分钟行情、Intent 状态、链上事件，支持断点续跑。
+  - 事务库：Postgres（或 SQLite 在开发期）记录 Intent、TxResult、PnL、Risk 决策；当前默认检测 `SUPABASE_DB_URL`，若存在即使用 Supabase Postgres，缺省时回落到本地 `phoenix.db`。
+  - 历史仓库：对象存储（S3/OSS）沉淀池体检报告、回测结果、监控快照。
+- storage 包需要 DAO 接口与 Migration 工具，保障 schema 变更可控；DryRun 与 RealRun 走同一写入路径，只是 Tx 状态不同。
+- 目前 `TradeRecord` 已扩展 `chain_id/strategy_version/risk_mode/notional_usd/gas_cost_usd` 字段，为后续审计和 PnL 聚合提供基础数据。
+
+### 6.4 风控策略联动
+
+- 引入 `StrategyProfile` 映射：`RiskMode`（normal/caution/frozen）→ 引擎参数（区间宽度、目标仓位、Gas 上限），策略根据当前风控模式自动调整行为。
+- `risk` 模块实现 Policy Engine，每条规则由配置驱动（条件、动作、冷却时间、严重级别），结果通过事件总线推送到 intent/strategy/dashboard。
+- poolguard 结果可以动态更新单池资金上限，策略在生成 Intent 前必须引用最新的 PoolRisk。
+
+### 6.5 执行链路一致性
+
+- gateway 增加 deterministic replay：DryRun/RealRun 共用同一编码/签名路径，并能用离线数据完全重放本地决策。
+- Intent 执行后必须回读链上仓位，与预期 tick 区间对比；若偏差超过阈值，立刻触发补救 Intent 或报警。
+- Nonce、Gas 管理要写成状态机，关键状态（Created/Signed/Broadcasted/Pending/Mined/Failed）记录到 storage，方便审计。
+
+### 6.6 CI/CD 与运维
+
+- DevOps 需要完成 CI（GitHub Actions/GitLab CI）：`go test ./...`、`golangci-lint`、前端 `npm test`、配置 Schema 校验。
+- 部署采用 Helm/Ansible，按环境（dev/dry-run、staging/测试网、prod/主网）打标签；通过 Feature Flag 控制 Gateway/PoolGuard 的灰度发布。
+- 监控栈升级：Prometheus + Grafana + Alertmanager，指标统一前缀 `phoenix_*`，覆盖 feed 延迟、RPC 健康、Intent 成功率、PnL、Gas；提供 Webhook 给 dashboard 做一键熔断。
+- 目前 `/healthz` 已返回 feed 健康信息（来源、延迟、最后更新时刻），后续可在此基础上扩展 Prometheus 指标与报警。
+
+### 6.7 安全与密钥管理
+
+- gateway 支持外部签名服务或 HSM，业务进程不再持有明文私钥；引入 Vault/KMS，授权由 DevOps 控制。
+- 对每笔资金操作做签名校验与二次确认（多签或强制审批流程），审计日志必须包含操作者与审批链条。
+- 池白名单、黑名单与密钥权限一起纳入审批流程，确保上线前完成安全 Review。
+
+### 6.8 事件流与 Supabase 当前进展
+
+- Bot 已经把 Binance 行情和 Intent 执行记录推送到事件流：默认使用 `MemoryStream`，若在配置中设置 `events.driver=redis` 并填写 `redis_url`，将切换为 Redis Streams，支持跨进程消费与持久化；订阅端自动通过消费者组（`redis_group`）来实现断点续播。
+- storage 模块自动识别 Supabase Postgres 连接（`SUPABASE_DB_URL`），在生产环境可直接复用 Supabase 数据库，无需修改业务代码；本地未配置时继续使用 SQLite。
+- 下一阶段：
+  - 为 Redis 流添加 replay CLI，结合 Supabase 审计表验证 deterministic replay。
+  - 视需要接入 NATS/JetStream（events driver 扩展点）。
+  - 将 Risk/Monitor 接入事件流，基于事件驱动的熔断、报警、仪表盘刷新。
+
+### 6.9 Sepolia 测试网闭环（行情 → 策略 → Intent → Gateway → Storage → Monitor）
+
+- **链路基线已更新至 Sepolia：**
+  - `configs/config.yaml` 切换为 `chain_id=11155111`，RPC 选用 `https://ethereum-sepolia.publicnode.com`（低延迟公网节点，可随时替换为 Infura/Alchemy），并在 pools[].`token0_decimals/token1_decimals` 中声明真实精度，供 PoolWatcher/Engine 还原 tick ↔ 价格。
+  - `weth-usdc-03` 池使用真实合约：Factory `0x0227628f3F023bb0B980b67D528571c95c6DaC1c` 检测到的 0.3% 池 `0xC31a3878E3B0739866F8fC52b97Ae9611aBe427c`，`token0=USDC(0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238)`、`token1=WETH(0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9)`、PositionManager `0x1238536071E1c677A632429e3655c799b22cDA52`。配置层现在强制遵守 “token0 < token1” 排列，默认下单规模为 `token0=10 USDC`、`token1=0.01 WETH`，可直接用于 dry-run/real-run。
+- **密钥与数据库约定：**
+  - 运行前导出 `BOT_PRIVATE_KEY=1861f815dd251aab4b37c8d94cfacc508f321a31d4be74ff805926e0a8d98647`（务必通过环境变量注入，禁止写入 repo）。
+  - Supabase 已接入本地 Supavisor：`export SUPABASE_DB_URL="postgres://postgres.33398852766a1f341f67ad76:7QZWBV9UaE7rLq6sk09l9V6aptMO5IxwrLyeXPc05NE@192.168.3.18:6543/postgres"`（`postgres.<tenant_id>` 来自 `docker exec supabase-pooler env`，密码取自 `docker exec supabase-db printenv POSTGRES_PASSWORD`）。storage 在检测到该 DSN 后会自动开启 `prefer_simple_protocol` 并忽略 `AutoMigrate` 的 `relation already exists` 错误，彻底消除了 “prepared statement already exists (SQLSTATE 42P05)” 报错；`trade_records` 能稳定落到 Supabase，`phoenix.db` 仅作为 fallback。
+- **Dry-Run/Real-Run 流程：**
+  1. `dry_run=true`：运行 `SUPABASE_DB_URL=... BOT_PRIVATE_KEY=... go run ./cmd/bot`，观察 `feeds`, `pool_watcher`, `intent_executor`, `gateway` 日志以及 `/healthz` 指标；确认多源行情、池状态监控、意图生成、Adapter calldata 构建链路全绿，并在 Supabase `trade_records` 中有 DryRun 记录。
+  2. `dry_run=false`：补齐 Wallet 的 WETH/USDC 余额，写入真实下单 tick/amount，再运行同样命令确认 Gateway 成功拿到 ChainID=11155111，发送 tx 并在日志中记录 `tx_hash`，Supabase `tx_hash` 字段应落地。2025-12-11 的小额实盘中（wallet `0x39BF…c217`），IntentExecutor 连续发送多笔 mint：`0xcbb18aeb6e3a8f62576d442c1828b16be2d5080dd7108fcff02511a60c88ea61`、`0xe7d8088a6f0b6ed50bfd58ef786f7833ea027b156193456012bcc7bc498f587e`、`0xb921cf8ae5a5c4b879a41d0979cdd851e8e11d114cd109647fe5de91ea37892c`、`0x45f4c4a5baebf594ed437a7a64c1198a6e1e4f53c5c4cc8e4917d063f2b1e3bf`、`0x3a66b32c787599cfc7eb8c208de711383899fa989eeeecdfaa86dacbed012bc2` 均 `status=1`，证明 calldata + 授权链路 OK；当 USDC/WETH 减少后，后续 intent（如 `0x4cfd8451ba...`、`0x9ac00f6b...`）会以 `status=0` 快速失败。下一步需要接入余额/仓位检测，或在 `risk` 模块里设置“资产不足即熔断”，避免继续发送无效交易。
+- **本地 dry-run 快照（2025-12-11 01:58 UTC+8）：**
+  - Binance WS 仍返回 451，程序自动降级 REST 轮询并保留 CoinGecko 兜底，`/healthz` 能看到两路源的延迟与最后更新时间。
+  - `dexstate` 连接 `https://ethereum-sepolia.publicnode.com` 成功，`PoolWatcher` 每 5s 输出来自链上的 slot0/liquidity；2025-12-12 起改用 ABI decoder 直接读取 int24 tick 与 `uint128 liquidity`，并结合配置中的 token decimals 即时计算 DEX 价格（例：`tick=-80666 → dexPrice≈$3,188`），方便监控真实仓位。
+  - 策略每 ~5s 生成 Intent（ID `intent-1765389498233912705` 等），`IntentExecutor` 执行时输出 `Dry Run: Simulated Tx Execution`，adapter 已能够基于 metadata 构建 calldata。
+  - Monitor/API（:8080）成功启动，`/healthz` 可用于 Prometheus 抓取；在补齐 DSN 后，`trade_records` 直接写入 Supabase（`docker exec supabase-db psql -c 'select * from trade_records'` 可查看）。
+- **现有资产与 Swap 进度：**
+  - 钱包 `0x39BF...c217` 余额：`0.34 WETH`（`WETH.deposit` tx `0x01c6693b...` 后剩余）+ `400.000016 TUSD`；自 12 月 12 日起启用持久授权（`TUSD/WETH approve PositionManager`）与链上余额风控：IntentExecutor 在 RealRun 前会调用 Gateway 的 ERC20 `balanceOf` 校验 `token0/token1` 余额，不足则自动熔断 intent，避免再出现“资金不足仍发交易”导致的 gas 浪费。
+  - 2025-12-12 12:05 UTC+8 运行 `BOT_PRIVATE_KEY=... SUPABASE_DB_URL=... go run ./cmd/bot`（`dry_run=false`）：Binance WS 仍 451，程序自动 fallback REST + CoinGecko；IntentExecutor 以新 `tusd-weth-005` 配置（每笔 100 TUSD + 0.0315 WETH）连续发送 6 笔 mint，全部成功写链：`0xf9817ca3...`, `0xaf3e025f...`, `0x7654e22b...`, `0x255256c3...`, `0x1772bf55...`, `0x773ddd06...`，gas 介于 288k–407k。Supabase `trade_records` 已新增 `id=257~262`，状态仍为 `pending`（尚未实现 receipt watcher 回写），但 tx hash/nonce/时间戳可供追溯。
+  - 2025-12-12 12:05 UTC+8 运行 `BOT_PRIVATE_KEY=... SUPABASE_DB_URL=... go run ./cmd/bot`（`dry_run=false`）：Binance WS 仍 451，程序自动 fallback REST + CoinGecko；IntentExecutor 以新 `tusd-weth-005` 配置（每笔 100 TUSD + 0.0315 WETH）连续发送 6 笔 mint，全部成功写链：`0xf9817ca3...`, `0xaf3e025f...`, `0x7654e22b...`, `0x255256c3...`, `0x1772bf55...`, `0x773ddd06...`，gas 介于 288k–407k。Supabase `trade_records` 已新增 `id=257~262`，现已由 Gateway 内置的 receipt watcher 实时回写 `status=success/failed`，便于审计链路闭环。
+  - 同一日 12:03 UTC+8 曾以 `amount0=1,000 TUSD` 直接跑实盘，因 PositionManager 授权已被抢占且钱包余额不足，mint tx `0x9b8af63c...`、`0xf1a4eb4e...`、`0x09274dea...`、`0xdb713708...`、`0x4947b1a...`、`0x31fda1d...` 均以 `status=0` 回滚（220k gas）。结果促生了新的 TODO：① 将 `pools[].amount0/amount1` 调整为 100 TUSD / 0.0315 WETH；② 追加授权并实现余额风控，避免继续浪费 Gas。
+  - 已对 `SwapRouter 0x3bFA...` 执行授权（tx `0x394303a8...`），但多次调用 `exactInputSingle`（`0x24ed0599...`,`0xfa9be808...`,`0xacbb684e...`,`0x058734da...`）均在 26K gas 左右立即回滚，`Quoter` 也返回空 revert，判断为路由合约或池子在当前 RPC 上暂未接受 WETH→USDC swap；需进一步抓包（如 debug_traceTransaction）或改用其他可用路由/直接 pool.swap callback 合约。后续动作：①寻找可用的 Sepolia 稳定币 faucet/可授权 minter；②或部署轻量 `SwapHelper` 合约直接走 `UniswapV3Pool.swap`，用来补齐 USDC/WETH 余额后再继续实盘。
+  - 进一步验证官方 `SwapRouter02 0x68b3...`：地址在 Sepolia 为 EOA（`eth_getCode` 返回长度 0），`approve` + `exactInputSingle`（tx `0xf9e5c4c0...`、`0x423b4e25...`）虽然 `status=1`，但因目标无代码实际未执行 swap，也无事件日志，所以无法依赖。→ 必须自部署 SwapHelper 或切换到真实存在的 Router（可在测试网手动部署 v3-periphery）。
+  - Faucet 路径：QuickNode Multi Token Faucet（https://faucet.quicknode.com/ethereum/sepolia）提供含 USDC 的测试代币，登录 GitHub 后可领取；若 Faucet 使用的 USDC 地址不同，可在配置中新增 `token0/token1`，或自建一个 faucet token 池以验证 LP 全链路。现在也可以直接部署仓库新增的 `contracts/TestUSD.sol`（TUSD）替代 USDC：2025-12-11 完成合约部署 `TUSD=0x3E49DB88bC85135b6F716E5CD573cDd42b8640c5` 与首个 fee 3000 池（`0x041EB5542E83ca11AaD466a5BaE2F8570aF78E13`，仅作历史参考）；2025-12-12 起根据策略真实成交价（ETH≈3,180 USDT）改建 `fee=500` 池 `0x1E80b0b6d12Ecf2CDD08bC9c66f2fD594394331d`，区间 `[-90000,-70000]`，并通过 `scripts/tusd_setup.py add-liquidity --fee 500 --amount0 1000 --amount1 0.3` 注入 1,000 TUSD + 0.3 WETH（tx `0x2e1a5e61f9f4e8edf06f5ab088e8cb6994efd31d25c1bd75969fdc4442f35de8`）。`configs/config.yaml` 与 `DEPLOY.md` 已同步至 `pools[0].id=tusd-weth-005`，Phoenix Bot 运行即会盯住新池；旧池保留，可在需要时切换回 0.3% 费层做测试比对。
+  - **SwapHelper 合约：**
+    - 新增 `contracts/SwapHelper.sol`，实现 `swapExactInputSingle` + `uniswapV3SwapCallback`，可以直接把 WETH 兑换成 USDC（或任意 token0/token1 组合），无需依赖缺失的 Router。
+    - **部署记录**：使用 Docker `solc:0.8.20` 编译后，通过 python/web3 脚本部署到 Sepolia，合约地址 `0x6cA5769926FdcC8D39F78E9f00527e6D4415DBe1`（tx `0x1134f4e3529e839fbfd4eaee1b89c43484ec5de7a239b60ffb400cb7413fa8ff`）。随后给合约授权 WETH（tx `0xb63201c8c906567175635e4a59a76c2937910e5578db9b55116356022233445d`），再调用 `swapExactInputSingle` 将 0.01 WETH 换成 ~20.239098 USDC（tx `0x01af31118987c9da0beba8c0f16e9f98e5d35f8d870d65cf7a5c97e65e0d3cf0`），验证池子与回调链路正常。
+    - 使用方式：① 用户对 SwapHelper `approve` tokenIn；② 调用 `swapExactInputSingle(pool, tokenIn, tokenOut, amountIn, limit)`（`limit=0` 时会自动套用全区间价格）；③ SwapHelper 在回调中向池子支付 tokenIn，并将 tokenOut 返还给调用者。部署可用 Remix/foundry，将池地址 `0xC31a...` 与 token 地址作为参数传入即可。
+    - 若一次性兑换 0.05 WETH，会触发池端的价格保护（tx `0x2a63a04528ab0271ec3409135b7b0199d1c50ae3ff96e1fdf8d4ba0862331ecf` Revert: “SPL”），说明当前池深度有限，需要分批或额外注入流动性。
+- **监控补充：**
+  - `/healthz` 现在还会连带输出 Binance/CoinGecko Feed 状态 + PoolWatcher 最近一次 slot0 的区块高度；监控进程（Prometheus/Grafana）接入时可以直接抓取。
+  - 若命中 Binance WS 451（地理限制）会自动 fallback REST，后续在海外 VPS 部署即可恢复 WS 低延迟。
+- **后续动作：**
+  - 补充 `Phase 7` TODO：`(1)` 完成 Sepolia dry-run 回归记录、`(2)` 关掉 dry_run 的真实 Intent 测试、`(3)` 修复 Supabase 连接（确认 tenant/user）后再观测写入延迟。
+  - 端到端闭环拉齐后，再接真实 Gateway Adapter + 监控指标 Pack，进入测试链真实资金演练。

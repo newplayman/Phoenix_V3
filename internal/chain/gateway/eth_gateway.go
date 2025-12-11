@@ -2,23 +2,55 @@ package gateway
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
+	"strings"
 	"sync"
+	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"phoenix-v3/internal/chain"
-	"phoenix-v3/internal/strategy"
+	"phoenix-v3/internal/contracts"
 )
 
+type ReceiptResult struct {
+	Hash    common.Hash
+	Status  TxStatus
+	GasUsed uint64
+}
+
+var erc20ABI abi.ABI
+
+func init() {
+	parsed, err := abi.JSON(strings.NewReader(`[
+		{
+			"constant":true,
+			"inputs":[{"name":"owner","type":"address"}],
+			"name":"balanceOf",
+			"outputs":[{"name":"","type":"uint256"}],
+			"stateMutability":"view",
+			"type":"function"
+		}
+	]`))
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse erc20 abi: %v", err))
+	}
+	erc20ABI = parsed
+}
+
 type EthGateway struct {
-	client  *ethclient.Client
-	wallet  *chain.Wallet
-	chainID *big.Int
+	client    *ethclient.Client
+	wallet    *chain.Wallet
+	chainID   *big.Int
+	receiptCh chan ReceiptResult
 
 	nonceMu sync.Mutex
 	nonce   uint64
@@ -41,9 +73,10 @@ func NewEthGateway(rpcURL string, privKey string) (*EthGateway, error) {
 	}
 
 	gw := &EthGateway{
-		client:  client,
-		wallet:  wallet,
-		chainID: chainID,
+		client:    client,
+		wallet:    wallet,
+		chainID:   chainID,
+		receiptCh: make(chan ReceiptResult, 64),
 	}
 
 	// Initialize nonce
@@ -63,59 +96,129 @@ func (g *EthGateway) syncNonce() error {
 	return nil
 }
 
-func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResult, error) {
-	// 1. Adapter would build the raw transaction data here (or passed in intent)
-	// For Phase 4, we assume the intent *contains* or we construct *generic* tx data.
-	// In a real generic gateway, 'intent' might need to be converted to a specific Transaction Request.
-	// We'll simplify: We assume `intent` payload tells us what to do, but Adapter logic should reside outside Gateway strictly.
-	// However, usually Gateway accepts a "TxRequest" not just "Intent".
+func (g *EthGateway) Address() string {
+	return g.wallet.Address.Hex()
+}
 
-	// REFACTOR: Gateway should take `types.Transaction` or `CallData`.
-	// Since the interface is `Send(Intent)`, let's assume we have an "Adapter" that converts Intent -> TxData *before* calling Gateway?
-	// Or Gateway calls Adapter?
-	// The doc says: "chain/gateway: 把 Intent 变成链上交易".
-	// "chain/adapters: 为不同的 DEX 提供统一的 LP 操作接口 (BuildTx)".
+func (g *EthGateway) Receipts() <-chan ReceiptResult {
+	return g.receiptCh
+}
 
-	// So: Gateway calls Adapter to get Tx, then signs and sends.
-	// But `Gateway` struct usually shouldn't depend on specific DEX adapters.
-	// Let's make Gateway generic: SendTx(to, value, data).
-	// We will change the interface slightly in implementation or keep it high-level.
+func (g *EthGateway) WalletAddress() common.Address {
+	return g.wallet.Address
+}
 
-	// Let's assume for this demo, the Gateway constructs a simple transfer or logs it,
-	// because integrating the full UnixV3 Adapter with correct ABI in one step is huge.
+func (g *EthGateway) BalanceOfERC20(ctx context.Context, token common.Address) (*big.Int, error) {
+	data, err := erc20ABI.Pack("balanceOf", g.wallet.Address)
+	if err != nil {
+		return nil, fmt.Errorf("pack balanceOf failed: %w", err)
+	}
+	call := ethereum.CallMsg{To: &token, Data: data}
+	res, err := g.client.CallContract(ctx, call, nil)
+	if err != nil {
+		return nil, fmt.Errorf("call balanceOf failed: %w", err)
+	}
+	values, err := erc20ABI.Unpack("balanceOf", res)
+	if err != nil || len(values) == 0 {
+		return nil, fmt.Errorf("unpack balanceOf failed: %w", err)
+	}
+	bal, ok := values[0].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("unexpected balance type %T", values[0])
+	}
+	return bal, nil
+}
 
-	// Let's implement a "Mock Send" that simulates the heavy lifting if DryRun.
-	// But we want Real Mode.
-
+func (g *EthGateway) Send(ctx context.Context, intent contracts.Intent) (*TxResult, error) {
 	g.nonceMu.Lock()
 	defer g.nonceMu.Unlock()
 
 	log.Printf("[Gateway] Processing Intent %s. Nonce: %d", intent.ID, g.nonce)
 
-	// Mocking a transaction construction (Transfer 0 ETH to self)
-	// In reality, this `data` comes from Adapter.BuildMintTx(...)
-	toAddress := common.HexToAddress("0x0000000000000000000000000000000000000000") // Burn address for test
+	// 1. 构造交易请求（未来由 Adapter 提供）
+	var callData []byte
+	if hexData := intent.Metadata["calldata"]; hexData != "" {
+		if data, err := hex.DecodeString(strings.TrimPrefix(hexData, "0x")); err == nil {
+			callData = data
+		}
+	}
+	toMeta := intent.Metadata["target"]
+	if toMeta == "" {
+		toMeta = "0x0000000000000000000000000000000000000000"
+	}
+	toAddr := common.HexToAddress(toMeta)
 	value := big.NewInt(0)
-	gasLimit := uint64(21000)
-	gasPrice, _ := g.client.SuggestGasPrice(ctx)
+	if valStr := intent.Metadata["value"]; valStr != "" {
+		if val, ok := new(big.Int).SetString(valStr, 10); ok {
+			value = val
+		}
+	}
 
-	tx := types.NewTransaction(g.nonce, toAddress, value, gasLimit, gasPrice, nil)
+	tx := types.NewTransaction(g.nonce, toAddr, value, 800000, big.NewInt(0), callData)
 
+	// 2. Gas 估算与价格
+	gasPrice, err := g.client.SuggestGasPrice(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gas price error: %w", err)
+	}
+	tx = types.NewTransaction(g.nonce, toAddr, value, 800000, gasPrice, callData)
+
+	// 3. 签名
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(g.chainID), g.wallet.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign tx: %w", err)
 	}
 
-	// In Phase 4, we actually send it if we had a real RPC / key.
-	// err = g.client.SendTransaction(ctx, signedTx)
-	// For safety in this environment (no real keys), we just log "Signed".
-	log.Printf("[Gateway] Signed Tx Hash: %s", signedTx.Hash().Hex())
+	if err := g.client.SendTransaction(ctx, signedTx); err != nil {
+		return nil, fmt.Errorf("send tx failed: %w", err)
+	}
+	log.Printf("[Gateway] Sent Tx Hash: %s", signedTx.Hash().Hex())
 
-	// Increment nonce locally
 	g.nonce++
+
+	// 4. 等待回执（简化轮询）
+	go g.waitReceipt(signedTx.Hash())
 
 	return &TxResult{
 		Hash:   signedTx.Hash(),
 		Status: StatusPending,
 	}, nil
+}
+
+func (g *EthGateway) waitReceipt(hash common.Hash) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	for {
+		receipt, err := g.client.TransactionReceipt(ctx, hash)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				log.Printf("[Gateway] wait receipt canceled: %v", err)
+				return
+			}
+			if err.Error() == "not found" {
+				time.Sleep(3 * time.Second)
+				continue
+			}
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		log.Printf("[Gateway] Tx %s status=%d gasUsed=%d", hash.Hex(), receipt.Status, receipt.GasUsed)
+		var txStatus TxStatus
+		if receipt.Status == 1 {
+			txStatus = StatusMined
+		} else {
+			txStatus = StatusReverted
+		}
+		select {
+		case g.receiptCh <- ReceiptResult{
+			Hash:    hash,
+			Status:  txStatus,
+			GasUsed: receipt.GasUsed,
+		}:
+		default:
+			log.Printf("[Gateway] receipt channel full, drop %s", hash.Hex())
+		}
+		return
+	}
 }

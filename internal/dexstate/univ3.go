@@ -4,15 +4,48 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+
+	"phoenix-v3/internal/contracts"
 )
 
-// Minimal ABI for slot0 to avoid generating full binding yet
-// function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)
-const slot0Sig = "3850c7bd" // keccak256("slot0()")[:4]
+var poolABI abi.ABI
+
+func init() {
+	parsed, err := abi.JSON(strings.NewReader(`[
+		{
+			"inputs": [],
+			"name": "slot0",
+			"outputs": [
+				{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},
+				{"internalType":"int24","name":"tick","type":"int24"},
+				{"internalType":"uint16","name":"observationIndex","type":"uint16"},
+				{"internalType":"uint16","name":"observationCardinality","type":"uint16"},
+				{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"},
+				{"internalType":"uint8","name":"feeProtocol","type":"uint8"},
+				{"internalType":"bool","name":"unlocked","type":"bool"}
+			],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "liquidity",
+			"outputs": [{"internalType":"uint128","name":"","type":"uint128"}],
+			"stateMutability": "view",
+			"type": "function"
+		}
+	]`))
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse uniswap v3 pool abi: %v", err))
+	}
+	poolABI = parsed
+}
 
 type UniV3State struct {
 	client *ethclient.Client
@@ -27,57 +60,54 @@ func NewUniV3State(rpcURL string) (*UniV3State, error) {
 }
 
 func (u *UniV3State) GetPoolState(chainID int64, poolAddress common.Address) (*PoolState, error) {
-	// Call slot0()
-	callMsg := ethereum.CallMsg{
-		To:   &poolAddress,
-		Data: common.Hex2Bytes(slot0Sig),
-	}
-
-	result, err := u.client.CallContract(context.Background(), callMsg, nil)
+	slot0Bytes, err := callView(context.Background(), u.client, poolAddress, "slot0")
 	if err != nil {
-		return nil, fmt.Errorf("rpc call failed: %w", err)
+		return nil, err
+	}
+	var slot0 struct {
+		SqrtPriceX96               *big.Int
+		Tick                       *big.Int
+		ObservationIndex           uint16
+		ObservationCardinality     uint16
+		ObservationCardinalityNext uint16
+		FeeProtocol                uint8
+		Unlocked                   bool
+	}
+	if err := poolABI.UnpackIntoInterface(&slot0, "slot0", slot0Bytes); err != nil {
+		return nil, fmt.Errorf("decode slot0 failed: %w", err)
 	}
 
-	// Output is a big struct. tick is the 2nd 32-byte word (index 1), IF we consider ABI encoding?
-	// slot0 returns: (uint160 sqrtPriceX96, int24 tick, ...)
-	// uint160 is padded to 32 bytes (word 0).
-	// int24 is padded to 32 bytes (word 1).
-
-	if len(result) < 64 {
-		return nil, fmt.Errorf("unexpected result length: %d", len(result))
+	liquidityBytes, err := callView(context.Background(), u.client, poolAddress, "liquidity")
+	if err != nil {
+		return nil, err
+	}
+	var liq struct {
+		Value *big.Int
+	}
+	if err := poolABI.UnpackIntoInterface(&liq, "liquidity", liquidityBytes); err != nil {
+		return nil, fmt.Errorf("decode liquidity failed: %w", err)
 	}
 
-	// Parse Tick (it's a signed int24, but returned as 32 bytes signed integer)
-	tickBytes := result[32:64]
-	tickBig := new(big.Int).SetBytes(tickBytes)
-
-	// Handle negative numbers for 2's complement if needed, though SetBytes treats as unsigned.
-	// Since tick is int24, it can be negative.
-	// If the highest bit of the 32-byte word is set, it's negative.
-	// However, simple cast might be tricky in Go without proper ABI unpacking.
-	// Let's rely on standard big.Int conversion for signed?
-	// Actually, best practice is generating ABI or using ABI packer.
-	// For Phase 1 fast prototype, let's just attempt manual parse or switch to abi.
-
-	// Better approach: Let's assume positive for a quick "alive" check or implement minimal ABI parser.
-	// Let's interpret as int24.
-
-	// If the most significant byte is 0xFF, it's likely negative.
-	// Let's do a quick signed conversion.
-	if tickBytes[0] >= 128 {
-		// It's negative.
-		// (NOT X) + 1 = -X
-
-		// This is getting complex for a quick Phase 1.
-		// Let's assume we just print the raw value for now or use a proper ABI next.
-	}
-
-	// For now, let's just use the `big.Int`.
-
-	return &PoolState{
+	return &contracts.PoolState{
 		ChainID:     chainID,
 		PoolAddress: poolAddress,
-		CurrentTick: tickBig.Int64(), // This might be wrong for negative ticks effectively, but works for "reading something"
-		Liquidity:   big.NewInt(0),   // Not reading liquidity yet to save space
+		CurrentTick: slot0.Tick.Int64(),
+		Liquidity:   liq.Value,
 	}, nil
+}
+
+func callView(ctx context.Context, client *ethclient.Client, addr common.Address, method string) ([]byte, error) {
+	data, err := poolABI.Pack(method)
+	if err != nil {
+		return nil, fmt.Errorf("pack %s failed: %w", method, err)
+	}
+	callMsg := ethereum.CallMsg{
+		To:   &addr,
+		Data: data,
+	}
+	result, err := client.CallContract(ctx, callMsg, nil)
+	if err != nil {
+		return nil, fmt.Errorf("rpc call %s failed: %w", method, err)
+	}
+	return result, nil
 }
