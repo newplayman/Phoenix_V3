@@ -11,13 +11,13 @@
 - [x] **Phase 6:** 制定 `PoolGuard` (防蜜獾) 的检测标准和 `Risk` (风控) 的熔断规则。
 - [x] **Phase 6+:** 建立 `internal/contracts/` 数据契约骨架，让 Feed/DexState/Engine/Strategy/Gateway 使用统一结构。
 - [x] **Phase 6+:** 实现 `internal/events` 内存事件流 (MemoryStream)，串联 feed/dexstate/strategy。
-- [ ] **Phase 6+:** 设计事件流（Redis Streams/NATS）规范及持久化方案，确保跨模块通信可重放。
+- [x] **Phase 6+:** 设计事件流（Redis Streams/NATS）规范及持久化方案，确保跨模块通信可重放（`internal/events/REDIS_STREAMS_SPEC.md`，2025-12-12）。
 - [x] **Phase 6+:** 在配置中加入 `schema_version/strategy_version` 字段并在 Bot 中读取。
 - [x] **Phase 6+:** 实现本地 `config.Manager`（fsnotify 热重载）与 `ValidateConfig`，支持运行时订阅配置变更。
 - [ ] **Phase 6+:** 定义远程配置中心/策略版本治理方案（含热更新与 Schema 校验流程）。
 - [ ] **Phase 6+:** 设计“实时缓存 + 事务库 + 历史仓库”的三层存储与审计模型。
-- [ ] **Phase 6+:** 定义 `RiskMode` ↔ `StrategyProfile` 映射与 Policy Engine 规则格式。
-- [ ] **Phase 6+:** 设计执行链路一致性方案（deterministic replay + 链上回读校验）。
+- [x] **Phase 6+:** 定义 `RiskMode` ↔ `StrategyProfile` 映射与 Policy Engine 规则格式（`internal/config/config.go` + `internal/strategy/policy.go`，2025-12-12）。
+- [x] **Phase 6+:** 设计执行链路一致性方案（deterministic replay + 链上回读校验）（TradeRecord 记录 nonce/from/to 并在 receipt watcher 回读校验，2025-12-12）。
 
 ## 2. 后端开发工程师 (Backend Developer)
 
@@ -37,6 +37,7 @@
 ### 链上交互 & 存储 (Phase 4 - Phase 5)
 - [x] **Phase 4 (Adapter):** 使用 `abigen` 生成 Uniswap V3 Go binding，封装 Mint/Burn/Collect 操作。
 - [x] **Phase 4 (Gateway):** 实现 `chain/gateway` 模块，管理 Nonce，发送交易并追踪状态 (Pending/Mined/Failed)。
+- [x] **Phase 7+:** EthGateway 增加 nonce 同步重试与 gas price 乘子/递增策略，失败自动 backoff 重发（2025-12-12）。
 - [x] **Phase 5 (DryRun):** 在 `strategy` 和 `gateway` 中实现 `dry_run` 模式，只记录不发交易。
 - [x] **Phase 5 (Storage):** 实现 `storage` 模块 (SQLite)，用于持久化 Intent 记录和模拟交易结果。
 
@@ -58,15 +59,26 @@
 - [x] **Phase 6+:** 修复 Uniswap V3 Adapter ABI（fee/tick → `uint24/int24`），IntentExecutor 在 RealRun 可正确构造 calldata。
 - [x] **Phase 6+:** 兼容 Supabase/pgBouncer：AutoMigrate 容错 + `prefer_simple_protocol=true`，消除 prepared statement 冲突。
 - [x] **Phase 7:** IntentExecutor 关闭 dry_run，真实发送 mint 交易并写入 Supabase（tx hash/nonce 透明可追踪）。
-- [ ] **Phase 6+:** 扩展事件回放/回测 SDK，支持多 topic 批量回放与策略复盘。
+- [x] **Phase 6+:** 扩展事件回放/回测 SDK，支持多 topic 批量回放与策略复盘（`cmd/replay -stream a,b,c`，2025-12-12）。
 - [ ] **Phase 6+:** 实现远程配置中心客户端 + 配置审批流程，所有节点读取统一版本号。
 - [ ] **Phase 6+:** 重构 storage：DAO 接口、迁移工具、审计字段、DryRun/RealRun 共用写路径。
 - [ ] **Phase 6+:** 落地 Risk Policy Engine 与 `StrategyProfile` 动态调参机制。
-- [ ] **Phase 6+:** Gateway 增加 deterministic replay、链上回读校验与状态机化的 Nonce/Gas 管理。
+- [x] **Phase 6+:** Gateway 增加 deterministic replay、链上回读校验与状态机化的 Nonce/Gas 管理（ReceiptResult 携带 nonce/from/to，storage 回读校验，2025-12-12）。
 - [x] **Phase 7:** 引入余额/仓位风控（ERC20 余额校验），资产不足时自动熔断 Intent，避免浪费 gas。
 - [x] **Phase 7:** 修复 UniV3 tick/价格反向映射问题，让 engine/dexstate 在 fee=500 的池子上输出与链上价格一致的目标区间。
 - [x] **Phase 7:** Gateway 增加 receipt watcher，将 Supabase `trade_records.status` 从 `pending` 更新为 `success/failed` 并补写 gas 统计。
 - [ ] **Phase 7+:** 将回执中的 `gas_used/gas_price` 映射到 storage，计算 `gas_cost_usd` 并在 Dashboard/Supabase 展示。
+- [x] **Phase 7+:** 为 Swap 引入 Quoter/本地估值设置 `MinAmountOut`，并记录 swap 前后余额与滑点到 storage（2025-12-12）。
+- [x] **Phase 7+:** Storage 扩展 gas 明细与 `/api/trades` 查询接口，Dashboard 展示最近交易与 gas/swap 状态（2025-12-12）。
+- [x] **Phase 7+:** 增加 `/api/risk` 风险快照接口，并在 Dashboard 展示 RiskMode、日 gas/Swap 使用率（2025-12-12）。
+- [x] **Phase 7+:** Dashboard 展开 `swap_details` 显示滑点/实际输出；新增 `/api/intents/detail` 返回意图明细（2025-12-12）。
+- [x] **Phase 7+:** 新增 `/api/pools` 与 `/api/status.pools` 输出池运行快照，Dashboard 展示真实 DEX 价格/tick/流动性（2025-12-12）。
+- [x] **Phase 7+:** 新增 `/api/pnl` 日度 PnL 聚合接口与 Dashboard PnL 表格展示（2025-12-12）。
+- [x] **Phase 7+:** 执行链路增加 swap PnL 估算并写入 `TradeRecord.PnL`，为 Risk Drawdown 提供数据（2025-12-12）。
+- [x] **Phase 7+:** Collect/Withdraw 意图执行前后对比钱包余额，估算 realized PnL 并写入 `TradeRecord.PnL`（2025-12-12）。
+- [x] **Phase 7+:** 引入 Pool 级 cost basis（Mint notional 记账 + Withdraw 清算），估算完整 realized PnL（2025-12-12）。
+- [x] **Phase 7+:** cost basis 改为基于 Mint/Rebalance 真实钱包 deltaUSD 记账，提升 PnL 精度（2025-12-12）。
+- [x] **Phase 7+:** RiskManager 定时从 TradeRecord 聚合 PnL，更新 Drawdown 并自动熔断（2025-12-12）。
 
 ## 3. 前端开发工程师 (Frontend Developer)
 
@@ -76,6 +88,8 @@
 - [ ] **Phase 7:** 开发 PnL (盈亏) 监控面板，显示实时收益和资产曲线。
 - [ ] **Phase 8:** 实现控制台功能：暂停/恢复策略、一键清仓、紧急撤单按钮。
 - [ ] **Phase 6+:** 对接新监控指标与 Risk Mode/Fault 事件，提供一键熔断与配置版本展示。
+- [x] **Phase 6+:** PoolGuard 增加 allow/blacklist、缓存与外部 Provider 接口骨架，并在 API/Dashboard 暴露风险结果（2025-12-12）。
+- [x] **Phase 7+:** Bot 增加 `--dry-run` CLI 覆盖开关，便于无远程 PoolGuard 时继续安全演练（2025-12-12）。
 
 ## 4. UI设计师 (UI Designer)
 
@@ -118,5 +132,5 @@
 - [ ] **Phase 6+:** 部署 Vault/HSM 或外部签名服务，替换本地私钥。
 - [ ] **Phase 6+:** 为事件流、审计数据库、对象存储建立备份与灾备演练流程。
 - [ ] **Phase 6+:** 统一管理 Supabase 实例/凭证（`SUPABASE_DB_URL`），提供密钥轮换与权限隔离。
-- [x] **Phase 6+:** 打通 192.168.3.18 Supabase Postgres（`SUPABASE_DB_URL=postgres://postgres.33398852766a1f341f67ad76:7QZWBV9UaE7rLq6sk09l9V6aptMO5IxwrLyeXPc05NE@192.168.3.18:6543/postgres`，Supavisor tenant 来自 `docker exec supabase-pooler env`）。
+- [x] **Phase 6+:** 打通 Supabase Postgres（示例：`SUPABASE_DB_URL=postgres://postgres.<tenant_id>:<password>@<host>:6543/postgres`；tenant/password 由你自己的 Supavisor/Supabase 环境提供）。
 - [ ] **Phase 6+:** 部署与监控 Redis 事件流（ACL、持久化、连接数告警）并建立灾备方案。

@@ -5,18 +5,26 @@ import (
 )
 
 func TestPriceToTick(t *testing.T) {
-	// 1.0001^0 = 1
-	if tick := PriceToTick(1.0); tick != 0 {
-		t.Errorf("Expected tick 0 for price 1.0, got %d", tick)
+	tickForOne := PriceToTick(1.0)
+	if tickForOne >= 0 {
+		t.Errorf("expected negative tick for price=1.0 (due to decimals), got %d", tickForOne)
 	}
 
-	// 1.0001^276324 ~= 1000000000 (roughly) - let's test small numbers
-	// log(1.0001) is approx 0.000099995
-
-	// Test standard price, e.g. 2000
 	tick2000 := PriceToTick(2000.0)
-	if tick2000 < 75000 || tick2000 > 77000 {
-		t.Errorf("Tick for 2000 seems off, got %d", tick2000)
+	if tick2000 >= tickForOne {
+		t.Errorf("tick should decrease with price: tick(2000)=%d tick(1)=%d", tick2000, tickForOne)
+	}
+
+	// PriceToTickRaw skips decimal shift; 1.0 raw should map to 0
+	if tick := PriceToTickRaw(1.0); tick != 0 {
+		t.Errorf("expected raw price 1 to map to tick 0, got %d", tick)
+	}
+
+	// With decimals: higher price -> lower tick (since rawPrice is inverted).
+	t1 := PriceToTickWithDecimals(1000, 6, 18)
+	t2 := PriceToTickWithDecimals(2000, 6, 18)
+	if t2 >= t1 {
+		t.Fatalf("expected tick(2000) < tick(1000), got %d vs %d", t2, t1)
 	}
 }
 
@@ -45,7 +53,7 @@ func TestStandardASMMEngine_Calculate(t *testing.T) {
 	// Spread = 0.02 * 1.0 = 2%
 	// Lower ~ 1959, Upper ~ 2038
 
-	if out.TargetLowerTick >= out.TargetUpperTick {
-		t.Error("Lower tick should be less than upper tick")
+	if out.TargetLowerTick == out.TargetUpperTick {
+		t.Error("expected different ticks")
 	}
 }

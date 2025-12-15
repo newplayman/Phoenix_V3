@@ -1,0 +1,58 @@
+# Arbitrum One Real Trading Config
+schema_version: "2024-07-01"
+strategy_version: "basic-v1"
+
+events:
+  driver: "memory"
+  redis_url: ""
+
+chains:
+  - id: 42161
+    name: "arbitrum"
+    rpc: "https://arb1.arbitrum.io/rpc"
+
+pools:
+  - id: "weth-usdc-005"
+    chain_id: 42161
+    # Arbitrum WETH
+    token0: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1" 
+    # Arbitrum USDC (Native) - Check carefully if pool uses Native or Bridged USDC.e
+    # Assuming standard Native USDC (0xaf88d065e77c8cC2239327C5EDb3A432268e5831)
+    # OR Bridged USDC.e (0xFF970A61a04b1cA14834A43f5dE4533eBDDB5CC8)
+    # High volume pool usually WETH/USDC.e (bridged) or WETH/USDC (native).
+    # Let's use WETH / USDC (Native) 0.05% Pool which is very active.
+    # WETH: 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1
+    # USDC (Native): 0xaf88d065e77c8cC2239327C5EDb3A432268e5831
+    token1: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" 
+    # ETHUSDT feed prices WETH (stable per WETH), regardless of Uniswap token0/token1 ordering.
+    cex_price_token: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+    token0_decimals: 18
+    token1_decimals: 6
+    fee: 500
+     # WETH/USDC 0.05% Pool Address on Arbitrum
+    address: "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"
+    max_investment: "1.0" # Max 100% of wallet
+    # Arbitrum NonfungiblePositionManager
+    position_manager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
+    # Target amounts will be dynamically calculated by Rebalancer based on Wallet Balance
+    # We set strict "desired" to "0" to let Rebalancer decide based on TargetNotionalPct
+    amount0: "0"
+    amount1: "0"
+    stable_tokens:
+      - "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" # USDC (stable side)
+
+strategy:
+  name: "basic_rebalance"
+  dry_run: false # REAL TRADING
+  params:
+    threshold: 0.05
+
+risk:
+  max_daily_gas: 5.0 # $5 USD gas limit
+  consecutive_fails: 5
+  max_drawdown: 0.10
+  min_idle_cash_pct: 0.05 # Keep 5% USDC as buffer
+  max_swap_slippage_pct: 0.005 # 0.5%
+  
+monitoring:
+  port: 8082

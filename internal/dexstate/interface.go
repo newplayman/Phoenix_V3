@@ -7,10 +7,11 @@ import (
 )
 
 type PoolState struct {
-	ChainID     int64
-	PoolAddress common.Address
-	CurrentTick int64
-	Liquidity   *big.Int
+	ChainID      int64
+	PoolAddress  common.Address
+	CurrentTick  int64
+	Liquidity    *big.Int
+	SqrtPriceX96 *big.Int
 }
 
 type DexState interface {

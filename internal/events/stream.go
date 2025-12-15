@@ -11,6 +11,9 @@ const (
 	TopicTicker     Topic = "ticker"
 	TopicPoolState  Topic = "pool_state"
 	TopicIntentExec Topic = "intent_exec"
+	TopicStrategy   Topic = "strategy"
+	TopicRisk       Topic = "risk"
+	TopicAudit      Topic = "audit"
 )
 
 type Event struct {

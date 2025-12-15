@@ -3,39 +3,102 @@ strategy_version: "basic-v1"
 
 events:
   driver: "memory"
+  file_path: "logs/events.jsonl"
   redis_url: ""
   redis_prefix: "phoenix"
   redis_group: "phoenix-consumer"
+  replay_retention: "24h"
+  acks_required: false
+
+wallet:
+  min_idle_pct: 0.15
+
+poolguard:
+  enable_remote: false
+  cache_ttl: "6h"
+  goplus_url: ""
+  goplus_key_env: "GOPLUS_API_KEY"
+  honeypot_url: ""
+  honeypot_key_env: "HONEYPOT_API_KEY"
+  allowlist_tokens: []
+  blacklist_tokens:
+    - "0x000000000000000000000000000000000000dead"
 
 chains:
   - id: 11155111
     name: "sepolia"
     rpc: "https://ethereum-sepolia.publicnode.com"
+    # Uniswap V3 Quoter v2 on Sepolia (set empty to disable)
+    quoter_address: ""
 
 pools:
   - id: "tusd-weth-005"
     chain_id: 11155111
-    token0: "0x3E49DB88bC85135b6F716E5CD573cDd42b8640c5"
-    token1: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9"
-    token0_decimals: 6
-    token1_decimals: 18
+    token0: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9"
+    token1: "0x88048434d39d1174bad7F543C022a02dB70F62c4"
+    # Token priced by the CEX feed (ETHUSDT -> WETH price in USD).
+    cex_price_token: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9"
+    token0_decimals: 18
+    token1_decimals: 6
     fee: 500
-    address: "0x1E80b0b6d12Ecf2CDD08bC9c66f2fD594394331d"
+    address: "0x598D2A92FCE90B49F624F2B1c9d88373CaD767a3"
     max_investment: "0.5"
+    max_cap_pct: 0.2
+    max_daily_rebalances: 30
+    # Allow volatility-adaptive LP width (bounded by strategy.range.* below).
     position_manager: "0x1238536071E1c677A632429e3655c799b22cDA52"
-    amount0: "100000000"          # 100 TUSD (6 decimals)
-    amount1: "31500000000000000"  # 0.0315 WETH
+    # Note: the last position_token_id (221866) was burned during stress test; keep empty to allow fresh mint.
+    position_token_id: ""
+    amount0: "300000000000000000" # 0.3 WETH (18 decimals)
+    amount1: "1000000000"         # 1000 TUSD2 (6 decimals)
+    stable_tokens:
+      # Stable tokens are priced at 1.0 by the bot.
+      - "0x88048434d39d1174bad7F543C022a02dB70F62c4" # TUSD2 (stable side)
 
 strategy:
   name: "basic_rebalance"
   dry_run: false
+  rebalance:
+    # Cooldown after a successful rebalance (prevents immediate churn on a freshly-minted position).
+    min_interval: "30s"
+  range:
+    # Volatility-driven active LP width, in percent terms (0.005 == ±0.5%).
+    # Testnet stress settings: narrow + reactive.
+    min_width_pct: 0.003
+    max_width_pct: 0.02
+    # NOTE: sigma_daily is annualized to "per day" based on the feed cadence.
+    # With `-offline-feed` default settings, sigma_daily can be ~0.3..0.6, so use a smaller k to avoid clamping.
+    vol_k: 0.02
+    vol_window: "3m"
+  profiles:
+    normal:
+      target_notional_pct_multiplier: 1.0
+      min_spread_ticks_multiplier: 0.1
+      engine_risk_factor: 1.0
+      range_width_multiplier: 1.0
+    caution:
+      target_notional_pct_multiplier: 0.5
+      min_spread_ticks_multiplier: 1.5
+      engine_risk_factor: 0.7
+    frozen:
+      target_notional_pct_multiplier: 0.0
+      min_spread_ticks_multiplier: 10.0
+      engine_risk_factor: 0.0
   params:
     threshold: 0.05
 
 risk:
-  max_daily_gas: 1.0
+  max_daily_gas: 0.05
   max_drawdown: 0.10
   consecutive_fails: 5
+  max_utilization_pct: 0.5
+
+gateway:
+  gas_multiplier: 1.0
+  max_retries: 3
+  retry_backoff_ms: 1500
+  gas_bump_pct: 0.15
+  approval_multiplier: 1.05
 
 monitoring:
-  port: 8080
+  port: 8082

@@ -1,0 +1,102 @@
+schema_version: "2024-07-01"
+strategy_version: "basic-v1"
+
+events:
+  driver: "memory"
+  file_path: "logs/events.jsonl"
+  redis_url: ""
+  redis_prefix: "phoenix"
+  redis_group: "phoenix-consumer"
+  replay_retention: "24h"
+  acks_required: false
+
+wallet:
+  # Lower idle reserve so swap deficits are more likely (swap-path test).
+  min_idle_pct: 0.05
+
+poolguard:
+  enable_remote: false
+  cache_ttl: "6h"
+  goplus_url: ""
+  goplus_key_env: "GOPLUS_API_KEY"
+  honeypot_url: ""
+  honeypot_key_env: "HONEYPOT_API_KEY"
+  allowlist_tokens: []
+  blacklist_tokens:
+    - "0x000000000000000000000000000000000000dead"
+
+chains:
+  - id: 11155111
+    name: "sepolia"
+    rpc: "https://ethereum-sepolia.publicnode.com"
+    quoter_address: ""
+    # Deployed SwapHelper (direct pool.swap) - see Phoenix V3 doc and contracts/SwapHelper.sol
+    swap_helper_address: "0x6cA5769926FdcC8D39F78E9f00527e6D4415DBe1"
+
+pools:
+  - id: "tusd-weth-005"
+    chain_id: 11155111
+    token0: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9" # WETH
+    token1: "0x88048434d39d1174bad7F543C022a02dB70F62c4" # TUSD2
+    cex_price_token: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9"
+    token0_decimals: 18
+    token1_decimals: 6
+    fee: 500
+    address: "0x598D2A92FCE90B49F624F2B1c9d88373CaD767a3"
+    max_investment: "0.5"
+    # Increase cap to force imbalanced deficits -> swap plan generation.
+    max_cap_pct: 0.85
+    max_daily_rebalances: 20
+    position_manager: "0x1238536071E1c677A632429e3655c799b22cDA52"
+    position_token_id: ""
+    stable_tokens:
+      - "0x88048434d39d1174bad7F543C022a02dB70F62c4"
+
+strategy:
+  name: "basic_rebalance"
+  dry_run: false
+  rebalance:
+    # Keep a small residual liquidity so swaps don't revert when the bot is the only LP on testnet.
+    keep_liquidity_pct_for_swaps: 0.80
+    # Prevent immediate churn after a successful mint.
+    min_interval: "10s"
+  range:
+    # Narrow + faster reaction for testnet volatility stress.
+    min_width_pct: 0.002
+    max_width_pct: 0.012
+    vol_k: 0.003
+    vol_window: "1m"
+  profiles:
+    normal:
+      target_notional_pct_multiplier: 1.0
+      min_spread_ticks_multiplier: 0.05
+      engine_risk_factor: 1.0
+      range_width_multiplier: 1.0
+    caution:
+      target_notional_pct_multiplier: 0.5
+      min_spread_ticks_multiplier: 1.5
+      engine_risk_factor: 0.7
+    frozen:
+      target_notional_pct_multiplier: 0.0
+      min_spread_ticks_multiplier: 10.0
+      engine_risk_factor: 0.0
+  params:
+    threshold: 0.05
+
+risk:
+  max_daily_gas: 0.05
+  max_drawdown: 0.10
+  consecutive_fails: 5
+  # Let the bot use up to 85% of wallet for this swap-path test.
+  max_utilization_pct: 0.85
+  max_swap_slippage_pct: 0.02
+
+gateway:
+  gas_multiplier: 1.0
+  max_retries: 3
+  retry_backoff_ms: 1500
+  gas_bump_pct: 0.15
+  approval_multiplier: 1.05
+
+monitoring:
+  port: 8082

@@ -10,8 +10,6 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
-
-	"phoenix-v3/internal/contracts"
 )
 
 var poolABI abi.ABI
@@ -88,11 +86,12 @@ func (u *UniV3State) GetPoolState(chainID int64, poolAddress common.Address) (*P
 		return nil, fmt.Errorf("decode liquidity failed: %w", err)
 	}
 
-	return &contracts.PoolState{
-		ChainID:     chainID,
-		PoolAddress: poolAddress,
-		CurrentTick: slot0.Tick.Int64(),
-		Liquidity:   liq.Value,
+	return &PoolState{
+		ChainID:      chainID,
+		PoolAddress:  poolAddress,
+		CurrentTick:  slot0.Tick.Int64(),
+		Liquidity:    liq.Value,
+		SqrtPriceX96: slot0.SqrtPriceX96,
 	}, nil
 }
 

@@ -184,27 +184,29 @@ mint(0xYourPhoenixWallet, 1_000_000_000); // 1,000 TUSD (decimals = 6)
 | UniswapV3Factory | `0x0227628f3F023bb0B980b67D528571c95c6DaC1c` |
 | NonfungiblePositionManager | `0x1238536071E1c677A632429e3655c799b22cDA52` |
 
-1. 通过 `NonfungiblePositionManager.createAndInitializePoolIfNecessary(token0=TUSD, token1=WETH, fee=500, sqrtPriceX96=...)` 新建池（`token0` 必须是地址更小的合约，一般为 TUSD）。也可以使用脚本：
+1. 通过 `NonfungiblePositionManager.createAndInitializePoolIfNecessary(token0=TUSD, token1=WETH, fee=500, sqrtPriceX96=...)` 新建池（注意：Uniswap 的 token0/token1 是**按地址排序**的，不保证稳定币一定是 token0）。也可以使用脚本（`--price` 固定表示 **WETH/TUSD** 的人类单位价格，脚本会自动处理 token0/token1 排序与 decimals）：
 
 ```bash
-# 假设 TUSD_ADDRESS 为上一步输出
+# 假设 TUSD_ADDRESS 为上一步输出；若 ETH≈3180 TUSD，则 WETH/TUSD≈1/3180≈0.000314
 python scripts/tusd_setup.py create-pool --token $TUSD_ADDRESS --fee 500 --price 0.000314
 ```
 
 2. 使用 PositionManager `mint` 一笔基础仓位，例如：
    - `amount0Desired = 1_000_000_000`（1,000 TUSD）
    - `amount1Desired = 300_000_000_000_000_000`（0.3 WETH）
-   - `tickLower/tickUpper` 选择覆盖当前价格的区间（例如 `[-90000, -70000]`，对应 ETH≈3,180 USDT）。
+   - `tickLower/tickUpper` 选择覆盖当前价格的区间：建议先用脚本根据目标价格自动算 ticks（并对齐 tick spacing），不要手填。
 3. 也可用脚本自动增加流动性：
 
 ```bash
+python scripts/tusd_setup.py calc-ticks --token $TUSD_ADDRESS --fee 500 --stable-per-weth 3180 --width-pct 0.05
+
 python scripts/tusd_setup.py add-liquidity \
   --token $TUSD_ADDRESS \
   --fee 500 \
   --amount0 1000 \
   --amount1 0.3 \
-  --tick-lower -90000 \
-  --tick-upper -70000
+  --tick-lower <LOWER_TICK> \
+  --tick-upper <UPPER_TICK>
 ```
 
 4. 成功后可在 [Uniswap info](https://sepolia-info.uniswap.org/) 或 `eth_call` 查看池的 `liquidity` 与 `slot0`。
@@ -219,6 +221,7 @@ pools:
     chain_id: 11155111
     token0: "<TUSD_CONTRACT_ADDRESS>"
     token1: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9"   # Sepolia WETH
+    cex_price_token: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9"
     token0_decimals: 6
     token1_decimals: 18
     fee: 500
@@ -227,6 +230,8 @@ pools:
     position_manager: "0x1238536071E1c677A632429e3655c799b22cDA52"
     amount0: "100000000"              # 100 TUSD
     amount1: "31500000000000000"      # 0.0315 WETH
+    stable_tokens:
+      - "<TUSD_CONTRACT_ADDRESS>"     # stable side (priced at 1.0)
 ```
 
 策略加载后即可使用自建稳定币完成 mint/swap。若需要补仓，直接调用 `mint()` 给策略钱包增发，再通过 SwapHelper 兑换或重新添加流动性即可。
@@ -262,7 +267,7 @@ python scripts/tusd_setup.py add-liquidity \
   --token 0x3E49DB88bC85135b6F716E5CD573cDd42b8640c5 \
   --weth 0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9 \
   --fee 500 --amount0 1000 --amount1 0.3 \
-  --tick-lower -90000 --tick-upper -70000 \
+  --tick-lower <LOWER_TICK> --tick-upper <UPPER_TICK> \
   --rpc https://ethereum-sepolia.publicnode.com --key 0xYOUR_KEY
 
 # 永久授权 PositionManager（可使用任意钱包或 web3.py 脚本执行 ERC20 approve）
@@ -311,3 +316,7 @@ go run ./cmd/bot
 | Supabase 写入失败 | 检查 `SUPABASE_DB_URL`、网络连通性、`sslmode`；如需，可临时移除该变量回落到本地 SQLite。 |
 
 完成以上流程即可在 Sepolia 上完成真实干预，后续如需扩展监控或主网部署，可参考 TODO 列表的 Phase 7+ 任务。
+
+## 附：Phase 1 Testnet Rehearsal
+
+更细的 dry-run → Redis 事件流 → testnet 小额实盘演练步骤见：`TESTNET_REHEARSAL.md`。
