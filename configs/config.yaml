@@ -1,6 +1,17 @@
 schema_version: "2024-07-01"
 strategy_version: "basic-v1"
 
+api:
+  enable_legacy: false
+  control_plane_enabled: false
+  cors_allowed_origins:
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+
+safety:
+  kill_switch: true
+  allow_tx_broadcast: false
+
 events:
   driver: "memory"
   file_path: "logs/events.jsonl"
@@ -57,7 +68,7 @@ pools:
 
 strategy:
   name: "basic_rebalance"
-  dry_run: false
+  dry_run: true
   rebalance:
     # Cooldown after a successful rebalance (prevents immediate churn on a freshly-minted position).
     min_interval: "30s"

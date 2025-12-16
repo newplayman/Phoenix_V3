@@ -8,7 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-	
+
 	"phoenix-v3/internal/strategy"
 )
 
@@ -35,10 +35,10 @@ func (a *Adapter) TargetAddress() common.Address {
 
 // MintParams struct matching the ABI tuple
 type MintParams struct {
-	Token0         common.Address
-	Token1         common.Address
-	Fee            *big.Int // uint24 but go-ethereum uses big.Int or type reflection carefully. struct field type needs to match what Pack expects.
-	// Actually, for uint24, abi.Pack usually expects uint32 or *big.Int? 
+	Token0 common.Address
+	Token1 common.Address
+	Fee    *big.Int // uint24 but go-ethereum uses big.Int or type reflection carefully. struct field type needs to match what Pack expects.
+	// Actually, for uint24, abi.Pack usually expects uint32 or *big.Int?
 	// Let's check Geth ABI packing rules. Usually straightforward to use appropriate Go types.
 	// uint24 -> uint32 or *big.Int is safer. Let's try native types where possible or big.Int.
 	TickLower      *big.Int // int24
@@ -63,27 +63,27 @@ func (a *Adapter) BuildMintData(intent strategy.Intent) ([]byte, error) {
 	if fee.Sign() == 0 {
 		fee = big.NewInt(3000) // Default 0.3%
 	}
-	
+
 	tickLower := parseMetaBig(intent.Metadata, "lower_tick")
 	tickUpper := parseMetaBig(intent.Metadata, "upper_tick")
 	if tickLower.Cmp(tickUpper) >= 0 {
 		return nil, fmt.Errorf("mint: invalid ticks lower=%s upper=%s", tickLower.String(), tickUpper.String())
 	}
-	
+
 	amt0 := parseMetaBig(intent.Metadata, "amount0")
 	amt1 := parseMetaBig(intent.Metadata, "amount1")
 	if amt0.Sign() < 0 || amt1.Sign() < 0 {
 		return nil, fmt.Errorf("mint: invalid amounts amount0=%s amount1=%s", amt0.String(), amt1.String())
 	}
-	
+
 	// Slippage handling for Min amounts (Simple 0.5% default if not set)
-	// In Phase 1, we might just set 0 for strictly "Attempt construction" 
+	// In Phase 1, we might just set 0 for strictly "Attempt construction"
 	// or calc 0.98 * desired.
 	// Let's set 0 for simplicity/safety against revert on slight move,
 	// BUT production should compute this.
 	amt0Min := big.NewInt(0)
 	amt1Min := big.NewInt(0)
-	
+
 	recipient := common.HexToAddress(intent.Metadata["recipient"])
 	if recipient == (common.Address{}) {
 		return nil, fmt.Errorf("mint: recipient required")
@@ -93,7 +93,7 @@ func (a *Adapter) BuildMintData(intent strategy.Intent) ([]byte, error) {
 	// Struct matching the ABI:
 	// The ABI definition uses specific types.
 	// We need to pass a struct that matches the component structure.
-	
+
 	params := struct {
 		Token0         common.Address
 		Token1         common.Address
@@ -119,20 +119,20 @@ func (a *Adapter) BuildMintData(intent strategy.Intent) ([]byte, error) {
 		Recipient:      recipient,
 		Deadline:       deadline,
 	}
-	
+
 	// Pack "mint"
 	data, err := a.ParsedABI.Pack("mint", params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack mint: %w", err)
 	}
-	
+
 	return data, nil
 }
 
 func (a *Adapter) BuildDecreaseLiquidityData(intent strategy.Intent) ([]byte, error) {
 	tokenId := parseMetaBig(intent.Metadata, "token_id")
 	liq := parseMetaBig(intent.Metadata, "liquidity")
-	
+
 	params := struct {
 		TokenId    *big.Int
 		Liquidity  *big.Int
@@ -144,7 +144,7 @@ func (a *Adapter) BuildDecreaseLiquidityData(intent strategy.Intent) ([]byte, er
 		Liquidity:  liq,
 		Amount0Min: big.NewInt(0),
 		Amount1Min: big.NewInt(0),
-		Deadline:   big.NewInt(time.Now().Add(10*time.Minute).Unix()),
+		Deadline:   big.NewInt(time.Now().Add(10 * time.Minute).Unix()),
 	}
 	return a.ParsedABI.Pack("decreaseLiquidity", params)
 }
@@ -155,10 +155,10 @@ func (a *Adapter) BuildCollectData(intent strategy.Intent) ([]byte, error) {
 	if recipient == (common.Address{}) {
 		return nil, fmt.Errorf("collect: recipient required")
 	}
-	
+
 	// Max uint128 for Collect Max
 	max128 := new(big.Int).Sub(new(big.Int).Exp(big.NewInt(2), big.NewInt(128), nil), big.NewInt(1))
-	
+
 	params := struct {
 		TokenId    *big.Int
 		Recipient  common.Address

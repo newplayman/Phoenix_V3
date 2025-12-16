@@ -1,6 +1,18 @@
 schema_version: "2024-07-01"
 strategy_version: "basic-v1"
 
+api:
+  enable_legacy: false
+  # Explicitly enabled for controlled local console testing (still dry-run + kill-switch by default).
+  control_plane_enabled: true
+  cors_allowed_origins:
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+
+safety:
+  kill_switch: true
+  allow_tx_broadcast: false
+
 events:
   driver: "memory"
   file_path: "logs/events.jsonl"
@@ -54,7 +66,7 @@ pools:
 
 strategy:
   name: "basic_rebalance"
-  dry_run: false
+  dry_run: true
   rebalance:
     # Keep a small residual liquidity so swaps don't revert when the bot is the only LP on testnet.
     keep_liquidity_pct_for_swaps: 0.80
