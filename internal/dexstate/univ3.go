@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -58,7 +59,10 @@ func NewUniV3State(rpcURL string) (*UniV3State, error) {
 }
 
 func (u *UniV3State) GetPoolState(chainID int64, poolAddress common.Address) (*PoolState, error) {
-	slot0Bytes, err := callView(context.Background(), u.client, poolAddress, "slot0")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	slot0Bytes, err := callView(ctx, u.client, poolAddress, "slot0")
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +79,7 @@ func (u *UniV3State) GetPoolState(chainID int64, poolAddress common.Address) (*P
 		return nil, fmt.Errorf("decode slot0 failed: %w", err)
 	}
 
-	liquidityBytes, err := callView(context.Background(), u.client, poolAddress, "liquidity")
+	liquidityBytes, err := callView(ctx, u.client, poolAddress, "liquidity")
 	if err != nil {
 		return nil, err
 	}

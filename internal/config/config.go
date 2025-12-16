@@ -17,6 +17,8 @@ const CurrentSchemaVersion = "2024-07-01"
 type AppConfig struct {
 	SchemaVersion   string           `yaml:"schema_version"`
 	StrategyVersion string           `yaml:"strategy_version"`
+	API             APIConfig        `yaml:"api"`
+	Safety          SafetyConfig     `yaml:"safety"`
 	Events          EventConfig      `yaml:"events"`
 	Chains          []ChainConfig    `yaml:"chains"`
 	Pools           []PoolConfig     `yaml:"pools"`
@@ -28,47 +30,92 @@ type AppConfig struct {
 	Wallet          WalletConfig     `yaml:"wallet"`
 }
 
+// SafetySnapshot captures safe-by-default execution guardrails derived from config.
+// EffectiveDryRun must be treated as "no broadcasting / no side effects".
+type SafetySnapshot struct {
+	DryRun           bool
+	KillSwitch       bool
+	AllowTxBroadcast bool
+	EffectiveDryRun  bool
+}
+
+func SafetyFromConfig(cfg *AppConfig) SafetySnapshot {
+	s := SafetySnapshot{
+		DryRun:           true,
+		KillSwitch:       true,
+		AllowTxBroadcast: false,
+	}
+	if cfg != nil {
+		if cfg.Strategy.DryRun != nil {
+			s.DryRun = *cfg.Strategy.DryRun
+		}
+		if cfg.Safety.KillSwitch != nil {
+			s.KillSwitch = *cfg.Safety.KillSwitch
+		}
+		if cfg.Safety.AllowTxBroadcast != nil {
+			s.AllowTxBroadcast = *cfg.Safety.AllowTxBroadcast
+		}
+	}
+	s.EffectiveDryRun = s.DryRun || s.KillSwitch || !s.AllowTxBroadcast
+	return s
+}
+
+// APIConfig controls which HTTP APIs are exposed.
+// Control plane (write APIs) must be disabled by default.
+type APIConfig struct {
+	EnableLegacy        bool     `yaml:"enable_legacy"`
+	ControlPlaneEnabled bool     `yaml:"control_plane_enabled"`
+	CORSAllowedOrigins  []string `yaml:"cors_allowed_origins"`
+}
+
+// SafetyConfig enforces execution guardrails.
+// kill_switch defaults to true; allow_tx_broadcast defaults to false.
+type SafetyConfig struct {
+	KillSwitch       *bool `yaml:"kill_switch"`
+	AllowTxBroadcast *bool `yaml:"allow_tx_broadcast"`
+}
+
 type EventConfig struct {
 	Driver          string `yaml:"driver"`       // memory | redis
 	RedisURL        string `yaml:"redis_url"`    // redis://user:pass@host:6379/0
 	RedisPrefix     string `yaml:"redis_prefix"` // default: phoenix
 	RedisGroup      string `yaml:"redis_group"`  // default: phoenix-consumer
-	FilePath        string `yaml:"file_path"`   // for driver=file
+	FilePath        string `yaml:"file_path"`    // for driver=file
 	ReplayRetention string `yaml:"replay_retention"`
 	AcksRequired    bool   `yaml:"acks_required"`
 }
 
 type ChainConfig struct {
-	ID            int64  `yaml:"id"`
-	Name          string `yaml:"name"`
-	RPC           string `yaml:"rpc"`
-	QuoterAddress string `yaml:"quoter_address"` // Optional Uniswap V3 Quoter address for slippage control
+	ID                int64  `yaml:"id"`
+	Name              string `yaml:"name"`
+	RPC               string `yaml:"rpc"`
+	QuoterAddress     string `yaml:"quoter_address"`      // Optional Uniswap V3 Quoter address for slippage control
 	SwapHelperAddress string `yaml:"swap_helper_address"` // Optional SwapHelper for direct pool.swap on testnets
-	PrivKey       string `yaml:"-"`              // Loaded from env
+	PrivKey           string `yaml:"-"`                   // Loaded from env
 }
 
 type PoolConfig struct {
-	ID              string   `yaml:"id"`
-	ChainID         int64    `yaml:"chain_id"`
-	Token0          string   `yaml:"token0"`
-	Token1          string   `yaml:"token1"`
+	ID      string `yaml:"id"`
+	ChainID int64  `yaml:"chain_id"`
+	Token0  string `yaml:"token0"`
+	Token1  string `yaml:"token1"`
 	// CEXPriceToken is the token address whose "stable per token" price comes from the CEX feed.
 	// This avoids relying on Uniswap token ordering (token0/token1 is address-sorted).
 	// If empty, defaults to token1 for backward compatibility.
-	CEXPriceToken   string   `yaml:"cex_price_token"`
-	Fee             int      `yaml:"fee"`
-	Address         string   `yaml:"address"`
-	MaxInvestment   string   `yaml:"max_investment"`
-	MaxCapPct       float64  `yaml:"max_cap_pct"`
-	MinWidthPct     float64  `yaml:"min_width_pct"`
-	MaxWidthPct     float64  `yaml:"max_width_pct"`
-	MaxDailyRebalances int   `yaml:"max_daily_rebalances"`
-	PositionManager string   `yaml:"position_manager"`
+	CEXPriceToken      string  `yaml:"cex_price_token"`
+	Fee                int     `yaml:"fee"`
+	Address            string  `yaml:"address"`
+	MaxInvestment      string  `yaml:"max_investment"`
+	MaxCapPct          float64 `yaml:"max_cap_pct"`
+	MinWidthPct        float64 `yaml:"min_width_pct"`
+	MaxWidthPct        float64 `yaml:"max_width_pct"`
+	MaxDailyRebalances int     `yaml:"max_daily_rebalances"`
+	PositionManager    string  `yaml:"position_manager"`
 	// PositionTokenID optionally pins the UniV3 NFT position tokenId for this pool.
 	// Uniswap V3 NonfungiblePositionManager does NOT implement ERC721Enumerable,
 	// so the bot cannot reliably discover tokenIds via tokenOfOwnerByIndex.
 	// If empty, the bot may still learn it from its own mint receipts and persist it.
-	PositionTokenID string `yaml:"position_token_id"`
+	PositionTokenID string   `yaml:"position_token_id"`
 	Amount0         string   `yaml:"amount0"`
 	Amount1         string   `yaml:"amount1"`
 	Token0Decimals  int      `yaml:"token0_decimals"`
@@ -79,18 +126,19 @@ type PoolConfig struct {
 type StrategyConfig struct {
 	Name   string                 `yaml:"name"`
 	Params map[string]interface{} `yaml:"params"`
-	DryRun bool                   `yaml:"dry_run"`
-	Profiles map[string]StrategyProfile `yaml:"profiles"`
-	Range  StrategyRangeConfig    `yaml:"range"`
-	Rebalance StrategyRebalanceConfig `yaml:"rebalance"`
+	// DryRun defaults to true (safe-by-default). Set `dry_run: false` explicitly to disable.
+	DryRun    *bool                      `yaml:"dry_run"`
+	Profiles  map[string]StrategyProfile `yaml:"profiles"`
+	Range     StrategyRangeConfig        `yaml:"range"`
+	Rebalance StrategyRebalanceConfig    `yaml:"rebalance"`
 }
 
 type StrategyRangeConfig struct {
 	// Volatility-driven active LP width, in percent terms (0.02 == ±2%).
 	MinWidthPct float64 `yaml:"min_width_pct"`
 	MaxWidthPct float64 `yaml:"max_width_pct"`
-	VolK        float64 `yaml:"vol_k"`       // width ~= vol_k * sigma_daily
-	VolWindow   string  `yaml:"vol_window"`  // e.g. "6h"
+	VolK        float64 `yaml:"vol_k"`      // width ~= vol_k * sigma_daily
+	VolWindow   string  `yaml:"vol_window"` // e.g. "6h"
 }
 
 type StrategyRebalanceConfig struct {
@@ -111,21 +159,21 @@ type StrategyProfile struct {
 }
 
 type RiskConfig struct {
-	MaxDailyGas       float64 `yaml:"max_daily_gas"`
-	MaxDrawdown       float64 `yaml:"max_drawdown"`
-	ConsecutiveFails  int     `yaml:"consecutive_fails"`
-	MaxUtilizationPct float64 `yaml:"max_utilization_pct"`
+	MaxDailyGas        float64 `yaml:"max_daily_gas"`
+	MaxDrawdown        float64 `yaml:"max_drawdown"`
+	ConsecutiveFails   int     `yaml:"consecutive_fails"`
+	MaxUtilizationPct  float64 `yaml:"max_utilization_pct"`
 	MaxSwapSlippagePct float64 `yaml:"max_swap_slippage_pct"`
 }
 
 // GatewayConfig controls nonce/gas retry behavior.
 type GatewayConfig struct {
-	GasMultiplier   float64 `yaml:"gas_multiplier"`     // e.g. 1.1 to pay 10% premium
-	MaxRetries      int     `yaml:"max_retries"`        // total send retries
-	RetryBackoffMs  int     `yaml:"retry_backoff_ms"`   // base backoff in ms
-	GasBumpPct      float64 `yaml:"gas_bump_pct"`       // bump gas by pct on underpriced/retry
+	GasMultiplier      float64 `yaml:"gas_multiplier"`      // e.g. 1.1 to pay 10% premium
+	MaxRetries         int     `yaml:"max_retries"`         // total send retries
+	RetryBackoffMs     int     `yaml:"retry_backoff_ms"`    // base backoff in ms
+	GasBumpPct         float64 `yaml:"gas_bump_pct"`        // bump gas by pct on underpriced/retry
 	ApprovalMultiplier float64 `yaml:"approval_multiplier"` // approve amount * multiplier (>=1.0)
-	Preflight       *bool   `yaml:"preflight"`          // estimateGas/callStatic before sending (default: true)
+	Preflight          *bool   `yaml:"preflight"`           // estimateGas/callStatic before sending (default: true)
 }
 
 type MonitoringConfig struct {
@@ -153,6 +201,9 @@ func LoadConfig(path string) (*AppConfig, error) {
 		return nil, err
 	}
 
+	// Allow config templates to reference env vars, e.g. rpc: "${ARBITRUM_SEPOLIA_RPC_URL}".
+	data = []byte(os.ExpandEnv(string(data)))
+
 	var cfg AppConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
@@ -174,6 +225,35 @@ func ValidateConfig(cfg *AppConfig) error {
 		return fmt.Errorf("schema version mismatch: expect %s got %s", CurrentSchemaVersion, cfg.SchemaVersion)
 	}
 
+	// Hard safety gate: refuse to run against Arbitrum One (mainnet) unless explicitly allowed.
+	// This applies even in dry-run to prevent accidental "wrong chain" operations.
+	// Override with: PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE=1
+	unsafeAllowArbOne := strings.TrimSpace(os.Getenv("PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE")) == "1"
+
+	// Safety defaults.
+	if cfg.Safety.KillSwitch == nil {
+		v := true
+		cfg.Safety.KillSwitch = &v
+	}
+	if cfg.Safety.AllowTxBroadcast == nil {
+		v := false
+		cfg.Safety.AllowTxBroadcast = &v
+	}
+	// Strategy dry-run defaults to true.
+	if cfg.Strategy.DryRun == nil {
+		v := true
+		cfg.Strategy.DryRun = &v
+	}
+	// Config sanity: broadcasting requires explicit triple-unlock.
+	if cfg.Safety.AllowTxBroadcast != nil && *cfg.Safety.AllowTxBroadcast {
+		if cfg.Safety.KillSwitch == nil || *cfg.Safety.KillSwitch {
+			return errors.New("safety.allow_tx_broadcast=true requires safety.kill_switch=false")
+		}
+		if cfg.Strategy.DryRun == nil || *cfg.Strategy.DryRun {
+			return errors.New("safety.allow_tx_broadcast=true requires strategy.dry_run=false")
+		}
+	}
+
 	if len(cfg.Chains) == 0 {
 		return errors.New("at least one chain must be configured")
 	}
@@ -183,6 +263,9 @@ func ValidateConfig(cfg *AppConfig) error {
 		}
 		if chain.ID == 0 {
 			return fmt.Errorf("chains[%d] missing id", i)
+		}
+		if chain.ID == 42161 && !unsafeAllowArbOne {
+			return errors.New("blocked: chain id 42161 (Arbitrum One) requires PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE=1")
 		}
 		if strings.TrimSpace(chain.QuoterAddress) != "" {
 			if _, ok := parseAddr20(chain.QuoterAddress); !ok {
@@ -196,93 +279,93 @@ func ValidateConfig(cfg *AppConfig) error {
 		}
 	}
 
-		if len(cfg.Pools) == 0 {
-			return errors.New("at least one pool must be configured")
+	if len(cfg.Pools) == 0 {
+		return errors.New("at least one pool must be configured")
+	}
+	for i, pool := range cfg.Pools {
+		t0, ok := parseAddr20(pool.Token0)
+		if !ok {
+			return fmt.Errorf("pools[%d] token0 invalid address: %s", i, pool.Token0)
 		}
-			for i, pool := range cfg.Pools {
-				t0, ok := parseAddr20(pool.Token0)
-				if !ok {
-					return fmt.Errorf("pools[%d] token0 invalid address: %s", i, pool.Token0)
-				}
-				t1, ok := parseAddr20(pool.Token1)
-				if !ok {
-					return fmt.Errorf("pools[%d] token1 invalid address: %s", i, pool.Token1)
-				}
-				if !addrLess(t0, t1) {
-					return fmt.Errorf("pools[%d] token0 must be < token1 (uniswap ordering), got token0=%s token1=%s", i, pool.Token0, pool.Token1)
-				}
-				if pool.Address == "" {
-					return fmt.Errorf("pools[%d] address required", i)
-				}
-				if _, ok := parseAddr20(pool.Address); !ok {
-					return fmt.Errorf("pools[%d] address invalid: %s", i, pool.Address)
-				}
-				if pool.PositionManager == "" {
-					return fmt.Errorf("pools[%d] position_manager required", i)
-				}
-				if _, ok := parseAddr20(pool.PositionManager); !ok {
-					return fmt.Errorf("pools[%d] position_manager invalid: %s", i, pool.PositionManager)
-				}
-				if strings.TrimSpace(pool.PositionTokenID) != "" {
-					if _, err := strconv.ParseUint(strings.TrimSpace(pool.PositionTokenID), 10, 64); err != nil {
-						return fmt.Errorf("pools[%d] position_token_id must be a base-10 integer string", i)
-					}
-				}
-				if pool.Token0Decimals <= 0 || pool.Token1Decimals <= 0 {
-					return fmt.Errorf("pools[%d] token decimals must be > 0", i)
-				}
-			// Phase-1 safety rails:
-			// Phoenix derives "CEX price" for exactly one token (e.g. WETH) and assigns 1.0 to stable_tokens.
-			// Because Uniswap token0/token1 ordering is address-sorted, we must not assume "token1 is always WETH".
-			// The config MUST declare which token is CEX-priced, and which token is stable (via stable_tokens),
-			// otherwise price math will be poisoned and can lead to waste pools / revert spam / gas burn.
-			token0 := strings.ToLower(strings.TrimSpace(pool.Token0))
-			token1 := strings.ToLower(strings.TrimSpace(pool.Token1))
+		t1, ok := parseAddr20(pool.Token1)
+		if !ok {
+			return fmt.Errorf("pools[%d] token1 invalid address: %s", i, pool.Token1)
+		}
+		if !addrLess(t0, t1) {
+			return fmt.Errorf("pools[%d] token0 must be < token1 (uniswap ordering), got token0=%s token1=%s", i, pool.Token0, pool.Token1)
+		}
+		if pool.Address == "" {
+			return fmt.Errorf("pools[%d] address required", i)
+		}
+		if _, ok := parseAddr20(pool.Address); !ok {
+			return fmt.Errorf("pools[%d] address invalid: %s", i, pool.Address)
+		}
+		if pool.PositionManager == "" {
+			return fmt.Errorf("pools[%d] position_manager required", i)
+		}
+		if _, ok := parseAddr20(pool.PositionManager); !ok {
+			return fmt.Errorf("pools[%d] position_manager invalid: %s", i, pool.PositionManager)
+		}
+		if strings.TrimSpace(pool.PositionTokenID) != "" {
+			if _, err := strconv.ParseUint(strings.TrimSpace(pool.PositionTokenID), 10, 64); err != nil {
+				return fmt.Errorf("pools[%d] position_token_id must be a base-10 integer string", i)
+			}
+		}
+		if pool.Token0Decimals <= 0 || pool.Token1Decimals <= 0 {
+			return fmt.Errorf("pools[%d] token decimals must be > 0", i)
+		}
+		// Phase-1 safety rails:
+		// Phoenix derives "CEX price" for exactly one token (e.g. WETH) and assigns 1.0 to stable_tokens.
+		// Because Uniswap token0/token1 ordering is address-sorted, we must not assume "token1 is always WETH".
+		// The config MUST declare which token is CEX-priced, and which token is stable (via stable_tokens),
+		// otherwise price math will be poisoned and can lead to waste pools / revert spam / gas burn.
+		token0 := strings.ToLower(strings.TrimSpace(pool.Token0))
+		token1 := strings.ToLower(strings.TrimSpace(pool.Token1))
 
-			cexToken := strings.ToLower(strings.TrimSpace(pool.CEXPriceToken))
-			if cexToken == "" {
-				cexToken = token1
-				cfg.Pools[i].CEXPriceToken = pool.Token1
-			}
-			if cexToken != token0 && cexToken != token1 {
-				return fmt.Errorf("pools[%d] cex_price_token must be token0 or token1", i)
-			}
-			expectedStable := token0
-			if cexToken == token0 {
-				expectedStable = token1
-			}
+		cexToken := strings.ToLower(strings.TrimSpace(pool.CEXPriceToken))
+		if cexToken == "" {
+			cexToken = token1
+			cfg.Pools[i].CEXPriceToken = pool.Token1
+		}
+		if cexToken != token0 && cexToken != token1 {
+			return fmt.Errorf("pools[%d] cex_price_token must be token0 or token1", i)
+		}
+		expectedStable := token0
+		if cexToken == token0 {
+			expectedStable = token1
+		}
 
-			if len(pool.StableTokens) == 0 {
-				return fmt.Errorf("pools[%d] stable_tokens required (must include the stable side of the pool)", i)
+		if len(pool.StableTokens) == 0 {
+			return fmt.Errorf("pools[%d] stable_tokens required (must include the stable side of the pool)", i)
+		}
+		seenStables := map[string]struct{}{}
+		hasExpectedStable := false
+		for _, stable := range pool.StableTokens {
+			s := strings.ToLower(strings.TrimSpace(stable))
+			if s == "" {
+				return fmt.Errorf("pools[%d] stable_tokens contains empty entry", i)
 			}
-			seenStables := map[string]struct{}{}
-			hasExpectedStable := false
-			for _, stable := range pool.StableTokens {
-				s := strings.ToLower(strings.TrimSpace(stable))
-				if s == "" {
-					return fmt.Errorf("pools[%d] stable_tokens contains empty entry", i)
-				}
-				if _, ok := parseAddr20(s); !ok {
-					return fmt.Errorf("pools[%d] stable_tokens contains invalid address %s", i, stable)
-				}
-				if s == cexToken {
-					return fmt.Errorf("pools[%d] stable_tokens must not include cex_price_token (%s)", i, pool.CEXPriceToken)
-				}
-				if _, dup := seenStables[s]; dup {
-					return fmt.Errorf("pools[%d] stable_tokens contains duplicate token %s", i, stable)
-				}
-				seenStables[s] = struct{}{}
-				if s == expectedStable {
-					hasExpectedStable = true
-				}
+			if _, ok := parseAddr20(s); !ok {
+				return fmt.Errorf("pools[%d] stable_tokens contains invalid address %s", i, stable)
 			}
-			if !hasExpectedStable {
-				return fmt.Errorf("pools[%d] stable_tokens must include the stable side of the pool (%s)", i, expectedStable)
+			if s == cexToken {
+				return fmt.Errorf("pools[%d] stable_tokens must not include cex_price_token (%s)", i, pool.CEXPriceToken)
 			}
-			if pool.MaxCapPct <= 0 || pool.MaxCapPct > 1 {
-				if cfg.Risk.MaxUtilizationPct > 0 {
-					cfg.Pools[i].MaxCapPct = cfg.Risk.MaxUtilizationPct
-				} else {
+			if _, dup := seenStables[s]; dup {
+				return fmt.Errorf("pools[%d] stable_tokens contains duplicate token %s", i, stable)
+			}
+			seenStables[s] = struct{}{}
+			if s == expectedStable {
+				hasExpectedStable = true
+			}
+		}
+		if !hasExpectedStable {
+			return fmt.Errorf("pools[%d] stable_tokens must include the stable side of the pool (%s)", i, expectedStable)
+		}
+		if pool.MaxCapPct <= 0 || pool.MaxCapPct > 1 {
+			if cfg.Risk.MaxUtilizationPct > 0 {
+				cfg.Pools[i].MaxCapPct = cfg.Risk.MaxUtilizationPct
+			} else {
 				return fmt.Errorf("pools[%d] max_cap_pct invalid", i)
 			}
 		}
@@ -343,6 +426,15 @@ func ValidateConfig(cfg *AppConfig) error {
 	}
 	if cfg.Events.ReplayRetention == "" {
 		cfg.Events.ReplayRetention = "24h"
+	}
+
+	// Default CORS allowlist for the browser-based console.
+	// For non-browser clients (curl/scripts), CORS is irrelevant.
+	if len(cfg.API.CORSAllowedOrigins) == 0 {
+		cfg.API.CORSAllowedOrigins = []string{
+			"http://localhost:5173",
+			"http://127.0.0.1:5173",
+		}
 	}
 
 	// Default strategy profiles.

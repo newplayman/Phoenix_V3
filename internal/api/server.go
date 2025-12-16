@@ -3,13 +3,18 @@ package api
 import (
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"phoenix-v3/internal/config"
+	"phoenix-v3/internal/events"
 	"phoenix-v3/internal/feed"
 	"phoenix-v3/internal/poolguard"
+	"phoenix-v3/internal/rebalancer"
 	"phoenix-v3/internal/risk"
 	"phoenix-v3/internal/storage"
 	"phoenix-v3/internal/strategy"
@@ -29,11 +34,9 @@ type SystemStatus struct {
 }
 
 type Server struct {
-	queue   *strategy.IntentQueue
-	lastCEX *feed.Ticker
-	store interface {
-		GetRecentTrades(limit int) ([]storage.TradeRecord, error)
-	}
+	queue    *strategy.IntentQueue
+	lastCEX  *feed.Ticker
+	store    *storage.Store
 	pnlStore interface {
 		GetDailyPnL(days int) ([]storage.DailyPnL, error)
 	}
@@ -54,23 +57,43 @@ type Server struct {
 	poolGuard interface {
 		Snapshot() map[string]poolguard.PoolCheckResult
 	}
-	poolsProvider func() []PoolStatus
+	poolsProvider     func() []PoolStatus
+	cfgProvider       func() *config.AppConfig
+	poolStateProvider func(string) (PoolStateSnapshot, bool)
+	eventStream       events.Stream
+	reb               rebalancer.Rebalancer
+	balanceProvider   func(int64) BalanceReader
+	manualOnly        bool
 
 	mu     sync.RWMutex
 	status *SystemStatus
+
+	adminToken string
+
+	rlMu sync.Mutex
+	rl   map[string]*rateBucket
 }
 
-func NewServer(q *strategy.IntentQueue, store interface{ GetRecentTrades(limit int) ([]storage.TradeRecord, error) }, riskMgr interface{ Snapshot() risk.Snapshot }, poolGuard interface{ Snapshot() map[string]poolguard.PoolCheckResult }, poolsProvider func() []PoolStatus) *Server {
+type rateBucket struct {
+	tokens float64
+	last   time.Time
+}
+
+func NewServer(q *strategy.IntentQueue, store *storage.Store, riskMgr interface{ Snapshot() risk.Snapshot }, poolGuard interface {
+	Snapshot() map[string]poolguard.PoolCheckResult
+}, poolsProvider func() []PoolStatus) *Server {
 	return NewServerWithConfig(q, store, riskMgr, poolGuard, poolsProvider, ServerConfig{})
 }
 
-func NewServerWithConfig(q *strategy.IntentQueue, store interface{ GetRecentTrades(limit int) ([]storage.TradeRecord, error) }, riskMgr interface{ Snapshot() risk.Snapshot }, poolGuard interface{ Snapshot() map[string]poolguard.PoolCheckResult }, poolsProvider func() []PoolStatus, cfg ServerConfig) *Server {
+func NewServerWithConfig(q *strategy.IntentQueue, store *storage.Store, riskMgr interface{ Snapshot() risk.Snapshot }, poolGuard interface {
+	Snapshot() map[string]poolguard.PoolCheckResult
+}, poolsProvider func() []PoolStatus, cfg ServerConfig) *Server {
 	return &Server{
-		queue: q,
-		store: store,
-		pnlStore: nil,
-		riskMgr: riskMgr,
-		poolGuard: poolGuard,
+		queue:         q,
+		store:         store,
+		pnlStore:      nil,
+		riskMgr:       riskMgr,
+		poolGuard:     poolGuard,
 		poolsProvider: poolsProvider,
 		status: &SystemStatus{
 			Healthy:          true,
@@ -79,23 +102,79 @@ func NewServerWithConfig(q *strategy.IntentQueue, store interface{ GetRecentTrad
 			BinanceConnected: cfg.BinanceConnected,
 			PriceSource:      cfg.PriceSource,
 		},
+		adminToken: strings.TrimSpace(os.Getenv("ADMIN_TOKEN")),
+		rl:         map[string]*rateBucket{},
 	}
 }
 
+func (s *Server) allowRequest(r *http.Request) bool {
+	const burst = 20.0
+	const refillPerSec = 10.0
+	const pruneMinEntries = 2048
+	const pruneIdle = 30 * time.Minute
+
+	host := strings.TrimSpace(r.RemoteAddr)
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = h
+	}
+	if host == "" {
+		host = "unknown"
+	}
+
+	now := time.Now()
+	s.rlMu.Lock()
+	defer s.rlMu.Unlock()
+	// Best-effort pruning to avoid unbounded growth if many distinct hosts hit the API.
+	// Rate limiting is a safety layer; it must not become a memory leak.
+	if len(s.rl) >= pruneMinEntries {
+		for k, v := range s.rl {
+			if v == nil || now.Sub(v.last) > pruneIdle {
+				delete(s.rl, k)
+			}
+		}
+	}
+	b, ok := s.rl[host]
+	if !ok || b == nil {
+		s.rl[host] = &rateBucket{tokens: burst - 1, last: now}
+		return true
+	}
+	elapsed := now.Sub(b.last).Seconds()
+	if elapsed > 0 {
+		b.tokens += elapsed * refillPerSec
+		if b.tokens > burst {
+			b.tokens = burst
+		}
+		b.last = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens -= 1
+	return true
+}
+
 // AttachPnLStore injects a store that supports PnL aggregation.
-func (s *Server) AttachPnLStore(pnlStore interface{ GetDailyPnL(days int) ([]storage.DailyPnL, error) }) {
+func (s *Server) AttachPnLStore(pnlStore interface {
+	GetDailyPnL(days int) ([]storage.DailyPnL, error)
+}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pnlStore = pnlStore
 }
 
-func (s *Server) AttachPauseController(pauseCtl interface{ SetPaused(bool); Paused() bool }) {
+func (s *Server) AttachPauseController(pauseCtl interface {
+	SetPaused(bool)
+	Paused() bool
+}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pauseCtl = pauseCtl
 }
 
-func (s *Server) AttachCleanupController(cleanupCtl interface{ TriggerCleanup() error; InProgress() bool }) {
+func (s *Server) AttachCleanupController(cleanupCtl interface {
+	TriggerCleanup() error
+	InProgress() bool
+}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupCtl = cleanupCtl
@@ -105,6 +184,13 @@ func (s *Server) AttachRebalanceController(rebalanceCtl interface{ TriggerRebala
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rebalanceCtl = rebalanceCtl
+}
+
+// SetManualOnly marks the bot as running in "manual-only" mode (no automatic strategy evaluation loop).
+func (s *Server) SetManualOnly(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.manualOnly = v
 }
 
 func (s *Server) UpdateCEXPrice(t feed.Ticker) {
@@ -137,11 +223,49 @@ func (s *Server) UpdateFeedStatus(status feed.FeedStatus) {
 }
 
 func (s *Server) Start(port string) {
+	go func() {
+		if err := http.ListenAndServe(":"+port, s.Handler()); err != nil {
+			log.Printf("[API] server exited: %v", err)
+		}
+	}()
+}
+
+func (s *Server) Handler() http.Handler {
 	cors := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			origin := strings.TrimSpace(r.Header.Get("Origin"))
+			if origin != "" {
+				allowed := false
+				if s.cfgProvider != nil {
+					if cfg := s.cfgProvider(); cfg != nil {
+						for _, o := range cfg.API.CORSAllowedOrigins {
+							if strings.EqualFold(strings.TrimSpace(o), origin) {
+								allowed = true
+								break
+							}
+						}
+					}
+				}
+				if allowed {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Vary", "Origin")
+				}
+				// If origin is present but not allowed, do not set allow-origin; browsers will block.
+			}
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 			if r.Method == http.MethodOptions {
+				if origin != "" && w.Header().Get("Access-Control-Allow-Origin") == "" {
+					w.WriteHeader(http.StatusForbidden)
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]interface{}{"code": "cors_forbidden", "message": "origin not allowed"}})
+					return
+				}
 				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			if !s.allowRequest(r) {
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]interface{}{"code": "rate_limited", "message": "too many requests"}})
 				return
 			}
 			next(w, r)
@@ -149,24 +273,90 @@ func (s *Server) Start(port string) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/status", cors(s.handleStatus))
-	mux.HandleFunc("/api/intents", cors(s.handleIntents))
-	mux.HandleFunc("/api/trades", cors(s.handleTrades))
-	mux.HandleFunc("/api/risk", cors(s.handleRisk))
-	mux.HandleFunc("/api/intents/detail", cors(s.handleIntentDetails))
-	mux.HandleFunc("/api/pools", cors(s.handlePools))
-	mux.HandleFunc("/api/pnl", cors(s.handlePnL))
-	mux.HandleFunc("/api/control/pause", cors(s.handlePause))
-	mux.HandleFunc("/api/control/resume", cors(s.handleResume))
-	mux.HandleFunc("/api/control/riskmode", cors(s.handleRiskMode))
-	mux.HandleFunc("/api/control/cleanup", cors(s.handleCleanup))
-	mux.HandleFunc("/api/control/rebalance", cors(s.handleRebalance))
 
-	go func() {
-		if err := http.ListenAndServe(":"+port, mux); err != nil {
-			log.Printf("[API] server exited: %v", err)
+	// Legacy endpoints are disabled by default; they also require v1 auth when enabled.
+	// Phoenix console must use /api/v1/* as the contract source of truth (docs/).
+	if s.legacyEnabled() {
+		mux.HandleFunc("/api/status", cors(s.authV1(s.handleStatus)))
+		mux.HandleFunc("/api/intents", cors(s.authV1(s.handleIntents)))
+		mux.HandleFunc("/api/trades", cors(s.authV1(s.handleTrades)))
+		mux.HandleFunc("/api/risk", cors(s.authV1(s.handleRisk)))
+		mux.HandleFunc("/api/intents/detail", cors(s.authV1(s.handleIntentDetails)))
+		mux.HandleFunc("/api/pools", cors(s.authV1(s.handlePools)))
+		mux.HandleFunc("/api/pnl", cors(s.authV1(s.handlePnL)))
+		mux.HandleFunc("/api/control/pause", cors(s.authV1(s.handlePause)))
+		mux.HandleFunc("/api/control/resume", cors(s.authV1(s.handleResume)))
+		mux.HandleFunc("/api/control/riskmode", cors(s.authV1(s.handleRiskMode)))
+		mux.HandleFunc("/api/control/cleanup", cors(s.authV1(s.handleCleanup)))
+		mux.HandleFunc("/api/control/rebalance", cors(s.authV1(s.handleRebalance)))
+	}
+
+	// v1 console API
+	mux.HandleFunc("/api/v1/health", cors(s.authV1(s.handleV1Health)))
+	mux.HandleFunc("/api/v1/pools", cors(s.authV1(s.handleV1Pools)))
+	mux.HandleFunc("/api/v1/pools/", cors(s.authV1(s.handleV1PoolSubroutes)))
+	mux.HandleFunc("/api/v1/intents", cors(s.authV1(s.handleV1Intents)))
+	mux.HandleFunc("/api/v1/intents/", cors(s.authV1(s.handleV1IntentByID)))
+	mux.HandleFunc("/api/v1/tx", cors(s.authV1(s.handleV1Tx)))
+	mux.HandleFunc("/api/v1/audit", cors(s.authV1(s.handleV1Audit)))
+	mux.HandleFunc("/api/v1/operations/preview", cors(s.authV1(s.handleV1OperationPreview)))
+	mux.HandleFunc("/api/v1/operations/execute", cors(s.authV1(s.handleV1OperationExecute)))
+	mux.HandleFunc("/api/v1/stream", cors(s.authV1(s.handleV1Stream)))
+
+	return mux
+}
+
+func (s *Server) legacyEnabled() bool {
+	// Hard gate via env for safety.
+	if strings.TrimSpace(os.Getenv("PHOENIX_ENABLE_LEGACY_API")) == "1" {
+		return true
+	}
+	if s.cfgProvider == nil {
+		return false
+	}
+	cfg := s.cfgProvider()
+	if cfg == nil {
+		return false
+	}
+	return cfg.API.EnableLegacy
+}
+
+func (s *Server) authV1(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.adminToken == "" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]interface{}{"code": "auth_unconfigured", "message": "ADMIN_TOKEN not set"}})
+			return
 		}
-	}()
+		h := strings.TrimSpace(r.Header.Get("Authorization"))
+		const prefix = "Bearer "
+		if !strings.HasPrefix(h, prefix) || strings.TrimSpace(strings.TrimPrefix(h, prefix)) != s.adminToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]interface{}{"code": "unauthorized", "message": "invalid token"}})
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) AttachConfigProvider(p func() *config.AppConfig) {
+	s.cfgProvider = p
+}
+
+func (s *Server) AttachPoolStateProvider(p func(string) (PoolStateSnapshot, bool)) {
+	s.poolStateProvider = p
+}
+
+func (s *Server) AttachEventStream(stream events.Stream) {
+	s.eventStream = stream
+}
+
+func (s *Server) AttachRebalancer(r rebalancer.Rebalancer) {
+	s.reb = r
+}
+
+func (s *Server) AttachBalanceProvider(p func(int64) BalanceReader) {
+	s.balanceProvider = p
 }
 
 // Control handlers are optional; if not wired, return 501.
@@ -201,7 +391,9 @@ func (s *Server) handleRiskMode(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	body := struct{ Mode string `json:"mode"` }{}
+	body := struct {
+		Mode string `json:"mode"`
+	}{}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Mode == "" {
 		body.Mode = r.URL.Query().Get("mode")
@@ -255,7 +447,9 @@ func (s *Server) handleRebalance(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotImplemented)
 		return
 	}
-	body := struct{ PoolID string `json:"pool_id"` }{}
+	body := struct {
+		PoolID string `json:"pool_id"`
+	}{}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.PoolID == "" {
 		body.PoolID = r.URL.Query().Get("pool_id")
@@ -297,8 +491,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				return s.cleanupCtl.InProgress()
 			}(),
 		},
-		"risk": s.getRiskSnapshot(),
-		"pools": s.getPoolsSnapshot(),
+		"risk":      s.getRiskSnapshot(),
+		"pools":     s.getPoolsSnapshot(),
 		"poolguard": s.getPoolGuardSnapshot(),
 	}
 	_ = json.NewEncoder(w).Encode(resp)

@@ -49,4 +49,3 @@ func TestPolicyEngineFallback(t *testing.T) {
 		t.Fatalf("expected fallback to normal profile, got %f", out.TargetNotionalPct)
 	}
 }
-

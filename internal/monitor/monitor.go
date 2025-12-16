@@ -20,8 +20,8 @@ type FeedMetric struct {
 }
 
 type Monitor struct {
-	cfg config.MonitoringConfig
-	statusProvider func() map[string]interface{}
+	cfg             config.MonitoringConfig
+	statusProvider  func() map[string]interface{}
 	metricsProvider func() string
 
 	mu    sync.RWMutex

@@ -48,15 +48,15 @@ func ParseMode(mode string) (RiskMode, error) {
 }
 
 type Snapshot struct {
-	Mode            RiskMode `json:"mode"`
-	DailyGasUsed    float64  `json:"dailyGasUsed"`
-	MaxDailyGas     float64  `json:"maxDailyGas"`
-	DailySwapVolUSD float64  `json:"dailySwapVolUsd"`
-	MaxDailySwapVol float64  `json:"maxDailySwapVol"`
-	DailySwapCount  int      `json:"dailySwapCount"`
-	MaxDailySwaps   int      `json:"maxDailySwaps"`
-	ConsecutiveFails int     `json:"consecutiveFails"`
-	MaxFails        int      `json:"maxFails"`
+	Mode             RiskMode `json:"mode"`
+	DailyGasUsed     float64  `json:"dailyGasUsed"`
+	MaxDailyGas      float64  `json:"maxDailyGas"`
+	DailySwapVolUSD  float64  `json:"dailySwapVolUsd"`
+	MaxDailySwapVol  float64  `json:"maxDailySwapVol"`
+	DailySwapCount   int      `json:"dailySwapCount"`
+	MaxDailySwaps    int      `json:"maxDailySwaps"`
+	ConsecutiveFails int      `json:"consecutiveFails"`
+	MaxFails         int      `json:"maxFails"`
 }
 
 func (m *Manager) Snapshot() Snapshot {

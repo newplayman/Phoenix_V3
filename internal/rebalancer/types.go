@@ -50,11 +50,11 @@ type RebalancePlan struct {
 }
 
 type SwapAction struct {
-	FromToken    common.Address
-	ToToken      common.Address
+	FromToken common.Address
+	ToToken   common.Address
 	// Path optionally encodes multi-hop swap tokens including FromToken and ToToken.
 	// When len(Path) > 2, Router will build exactInput calldata.
-	Path         []common.Address
+	Path []common.Address
 	// Fees contains per-hop Uniswap V3 fee tiers matching Path segments.
 	// For single-hop swaps, Fee is used instead.
 	Fees         []uint32

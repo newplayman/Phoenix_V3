@@ -3,7 +3,6 @@ package storage
 import (
 	"errors"
 	"log"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -17,30 +16,30 @@ import (
 )
 
 type TradeRecord struct {
-	ID              uint      `gorm:"primaryKey"`
-	Time            time.Time `gorm:"index"`
-	IntentID        string    `gorm:"type:varchar(128)"`
-	Type            string    `gorm:"type:varchar(32)"`
-	PoolID          string    `gorm:"type:varchar(64)"`
-	ChainID         int64     `gorm:"index"`
-	TxHash          string    `gorm:"type:varchar(66)"`
-	TargetTo        string    `gorm:"type:varchar(66)"` // expected contract address (from intent)
-	OnchainTo       string    `gorm:"type:varchar(66)"` // read back from chain tx
-	FromAddress     string    `gorm:"type:varchar(66)"` // tx sender read back from chain
-	Nonce           uint64    `gorm:"index"`
-	Status          string    `gorm:"type:varchar(32)"`
-	Token0Amt       string    `gorm:"type:varchar(78)"` // raw amount in token0 decimals
-	Token1Amt       string    `gorm:"type:varchar(78)"` // raw amount in token1 decimals
-	SwapDetails     string    `gorm:"type:text"`        // JSON string for swap stats
-	GasUsed         uint64    `gorm:"index"`
-	EffectiveGasPrice string  `gorm:"type:varchar(78)"`
-	GasCostNative   float64   // native chain token cost (ETH on EVM)
-	PnL             float64
-	IsSimulation    bool   `gorm:"index"`
-	StrategyVersion string `gorm:"type:varchar(64)"`
-	RiskMode        string `gorm:"type:varchar(16)"`
-	NotionalUSD     float64
-	GasCostUSD      float64 // legacy field (kept for compatibility)
+	ID                uint      `gorm:"primaryKey"`
+	Time              time.Time `gorm:"index"`
+	IntentID          string    `gorm:"type:varchar(128)"`
+	Type              string    `gorm:"type:varchar(32)"`
+	PoolID            string    `gorm:"type:varchar(64)"`
+	ChainID           int64     `gorm:"index"`
+	TxHash            string    `gorm:"type:varchar(66)"`
+	TargetTo          string    `gorm:"type:varchar(66)"` // expected contract address (from intent)
+	OnchainTo         string    `gorm:"type:varchar(66)"` // read back from chain tx
+	FromAddress       string    `gorm:"type:varchar(66)"` // tx sender read back from chain
+	Nonce             uint64    `gorm:"index"`
+	Status            string    `gorm:"type:varchar(32)"`
+	Token0Amt         string    `gorm:"type:varchar(78)"` // raw amount in token0 decimals
+	Token1Amt         string    `gorm:"type:varchar(78)"` // raw amount in token1 decimals
+	SwapDetails       string    `gorm:"type:text"`        // JSON string for swap stats
+	GasUsed           uint64    `gorm:"index"`
+	EffectiveGasPrice string    `gorm:"type:varchar(78)"`
+	GasCostNative     float64   // native chain token cost (ETH on EVM)
+	PnL               float64
+	IsSimulation      bool   `gorm:"index"`
+	StrategyVersion   string `gorm:"type:varchar(64)"`
+	RiskMode          string `gorm:"type:varchar(16)"`
+	NotionalUSD       float64
+	GasCostUSD        float64 // legacy field (kept for compatibility)
 }
 
 type Store struct {
@@ -48,17 +47,17 @@ type Store struct {
 }
 
 type DailyPnL struct {
-	Day         time.Time `json:"day"`
-	PnLUSD      float64   `json:"pnl_usd"`
-	GasNative   float64   `json:"gas_native"`
-	NetPnLUSD   float64   `json:"net_pnl_usd"`
-	TradeCount  int64     `json:"trade_count"`
+	Day        time.Time `json:"day"`
+	PnLUSD     float64   `json:"pnl_usd"`
+	GasNative  float64   `json:"gas_native"`
+	NetPnLUSD  float64   `json:"net_pnl_usd"`
+	TradeCount int64     `json:"trade_count"`
 }
 
 type PoolCostBasis struct {
-	ID          uint      `gorm:"primaryKey"`
-	PoolID      string    `gorm:"uniqueIndex:pool_chain"`
-	ChainID     int64     `gorm:"uniqueIndex:pool_chain"`
+	ID          uint   `gorm:"primaryKey"`
+	PoolID      string `gorm:"uniqueIndex:pool_chain"`
+	ChainID     int64  `gorm:"uniqueIndex:pool_chain"`
 	NotionalUSD float64
 	UpdatedAt   time.Time `gorm:"index"`
 }
@@ -103,7 +102,7 @@ func newSQLiteStore(path string) (*Store, error) {
 
 func newPostgresStore(dsn string) (*Store, error) {
 	db, err := gorm.Open(postgres.New(postgres.Config{
-		DSN:                  applyPreferSimpleProtocol(dsn),
+		DSN:                  dsn,
 		PreferSimpleProtocol: true,
 	}), &gorm.Config{
 		Logger: logger.New(
@@ -126,7 +125,19 @@ func newPostgresStore(dsn string) (*Store, error) {
 }
 
 func migrate(db *gorm.DB) error {
-	if err := db.AutoMigrate(&TradeRecord{}, &PoolCostBasis{}, &PoolPosition{}); err != nil {
+	if err := db.AutoMigrate(
+		&TradeRecord{},
+		&PoolCostBasis{},
+		&PoolPosition{},
+		// Control plane / observability tables
+		&Operation{},
+		&OperatorAction{},
+		&IntentRecord{},
+		&IntentStepRecord{},
+		&TxReceiptRecord{},
+		&PoolSnapshot{},
+		&BotHeartbeat{},
+	); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
 			if pgErr.Code == "42P07" || pgErr.Code == "42P05" {
@@ -209,17 +220,6 @@ func (s *Store) ClearPoolCostBasis(poolID string, chainID int64) error {
 	return s.db.Where("pool_id = ? AND chain_id = ?", poolID, chainID).Delete(&PoolCostBasis{}).Error
 }
 
-func applyPreferSimpleProtocol(dsn string) string {
-	u, err := url.Parse(dsn)
-	if err != nil {
-		return dsn
-	}
-	q := u.Query()
-	q.Set("prefer_simple_protocol", "true")
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 func (s *Store) SaveTrade(r *TradeRecord) error {
 	return s.db.Create(r).Error
 }
@@ -237,6 +237,58 @@ func (s *Store) GetRecentTrades(limit int) ([]TradeRecord, error) {
 	var trades []TradeRecord
 	err := s.db.Order("time desc").Limit(limit).Find(&trades).Error
 	return trades, err
+}
+
+// ListTrades returns TradeRecord rows ordered by id desc.
+// cursorID is the last seen TradeRecord.ID for pagination (id < cursor).
+func (s *Store) ListTrades(poolID string, intentID string, status string, limit int, cursorID uint) ([]TradeRecord, uint, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	q := s.db.Model(&TradeRecord{}).Order("id desc").Limit(limit)
+	if cursorID > 0 {
+		q = q.Where("id < ?", cursorID)
+	}
+	if poolID = strings.TrimSpace(poolID); poolID != "" {
+		q = q.Where("pool_id = ?", poolID)
+	}
+	if intentID = strings.TrimSpace(intentID); intentID != "" {
+		q = q.Where("intent_id = ?", intentID)
+	}
+	if status = strings.TrimSpace(status); status != "" {
+		q = q.Where("status = ?", status)
+	}
+	var out []TradeRecord
+	if err := q.Find(&out).Error; err != nil {
+		return nil, 0, err
+	}
+	next := uint(0)
+	if len(out) == limit {
+		next = out[len(out)-1].ID
+	}
+	return out, next, nil
+}
+
+func (s *Store) GetTxReceipt(chainID int64, txHash string) (*TxReceiptRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	txHash = strings.TrimSpace(txHash)
+	if txHash == "" || chainID == 0 {
+		return nil, nil
+	}
+	var rec TxReceiptRecord
+	err := s.db.Where("chain_id = ? AND tx_hash = ?", chainID, txHash).First(&rec).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
 }
 
 // GetDailyPnL returns daily aggregated PnL series for the last `days` days.
@@ -293,9 +345,9 @@ func (s *Store) UpdateTradeStatusByHash(txHash string, status string) error {
 
 func (s *Store) UpdateTradeStatusWithGas(txHash string, status string, gasCostNative float64, gasUsed uint64, effectiveGasPrice string) error {
 	updates := map[string]interface{}{
-		"status":            status,
-		"gas_cost_native":   gasCostNative,
-		"gas_used":          gasUsed,
+		"status":              status,
+		"gas_cost_native":     gasCostNative,
+		"gas_used":            gasUsed,
 		"effective_gas_price": effectiveGasPrice,
 		// Keep legacy column in sync
 		"gas_cost_usd": gasCostNative,

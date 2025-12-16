@@ -140,7 +140,6 @@ func (g *Guard) CheckPool(ctx context.Context, poolID string, chainID int64, tok
 	return g.record(poolID, worstRisk, worstReason)
 }
 
-
 func (g *Guard) checkTotalSupply(ctx context.Context, chainID int64, token common.Address) (PoolRiskLevel, string) {
 	if chainID == 0 || g.chainCallers == nil {
 		return RiskSafe, "on-chain check skipped"
