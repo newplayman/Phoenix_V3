@@ -1,433 +1,243 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8081';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8081'
+const USE_MOCK = String(import.meta.env.VITE_USE_MOCK || '') === '1'
 
-function App() {
-    const [ticker, setTicker] = useState({ price: 2045.5, symbol: 'ETH/USDT' });
-    const [engineState] = useState({ lower: 1950, upper: 2150, delta: 0.05 });
-    const [systemStatus, setSystemStatus] = useState({
-        binanceConnected: false,
-        priceSource: 'Fallback',
-        healthy: true
-    });
-    const [intentCount, setIntentCount] = useState(0);
-    const [recentTrades, setRecentTrades] = useState([]);
-    const [riskStatus, setRiskStatus] = useState({
-        mode: 'normal',
-        dailyGasUsed: 0,
-        maxDailyGas: 0,
-        dailySwapVolUsd: 0,
-        maxDailySwapVol: 0,
-        dailySwapCount: 0,
-        maxDailySwaps: 0
-    });
-    const [pools, setPools] = useState([]);
-    const [pnlSeries, setPnlSeries] = useState([]);
-    const [poolGuardMap, setPoolGuardMap] = useState({});
-    const [paused, setPaused] = useState(false);
-    const [controlError, setControlError] = useState('');
-    const [cleanupInProgress, setCleanupInProgress] = useState(false);
-    const [riskMode, setRiskMode] = useState('normal');
+export default function App() {
+  const [adminToken, setAdminToken] = useState(() => sessionStorage.getItem('phoenix_admin_token') || '')
+  const [error, setError] = useState('')
+  const [health, setHealth] = useState(null)
+  const [pools, setPools] = useState([])
+  const [poolState, setPoolState] = useState(null)
 
-    useEffect(() => {
-        const fetchStatus = async () => {
-            try {
-                const [statusRes, intentRes, tradesRes, riskRes, poolsRes, pnlRes] = await Promise.all([
-                    fetch(`${API_BASE}/api/status`),
-                    fetch(`${API_BASE}/api/intents`),
-                    fetch(`${API_BASE}/api/trades`),
-                    fetch(`${API_BASE}/api/risk`),
-                    fetch(`${API_BASE}/api/pools`),
-                    fetch(`${API_BASE}/api/pnl`)
-                ]);
+  const authHeader = useMemo(() => {
+    if (!adminToken) return {}
+    return { Authorization: `Bearer ${adminToken}` }
+  }, [adminToken])
 
-                if (statusRes.ok) {
-                    const data = await statusRes.json();
-                    if (data?.market?.price > 0) {
-                        setTicker({
-                            price: data.market.price,
-                            symbol: data.market.symbol || 'ETH/USDT'
-                        });
-                        document.title = `Phoenix V3 | $${data.market.price.toFixed(2)}`;
-                    }
-                    if (data?.system) {
-                        setSystemStatus({
-                            binanceConnected: !!data.system.binance_connected,
-                            priceSource: data.system.price_source || 'Fallback',
-                            healthy: !!data.system.healthy
-                        });
-                    }
-                    if (data?.poolguard) {
-                        setPoolGuardMap(data.poolguard);
-                    }
-                    if (data?.control) {
-                        setPaused(!!data.control.paused);
-                        setCleanupInProgress(!!data.control.cleanup_in_progress);
-                    }
-                    if (data?.risk?.mode) {
-                        setRiskMode(data.risk.mode);
-                    }
-                }
+  const apiFetch = async (path) => {
+    const res = await fetch(`${API_BASE}${path}`, { headers: { ...authHeader } })
+    const json = await res.json().catch(() => null)
+    if (!res.ok) {
+      const code = json?.error?.code || 'request_failed'
+      const msg = json?.error?.message || res.statusText
+      throw new Error(`${code}: ${msg}`)
+    }
+    return json
+  }
 
-                if (intentRes.ok) {
-                    const intents = await intentRes.json();
-                    setIntentCount(intents?.pending_count ?? 0);
-                }
+  useEffect(() => {
+    sessionStorage.setItem('phoenix_admin_token', adminToken)
+  }, [adminToken])
 
-                if (tradesRes.ok) {
-                    const tradesData = await tradesRes.json();
-                    setRecentTrades(tradesData?.trades ?? []);
-                }
+  useEffect(() => {
+    let cancelled = false
 
-                if (riskRes.ok) {
-                    const riskData = await riskRes.json();
-                    if (riskData?.risk) {
-                        setRiskStatus(riskData.risk);
-                    }
-                } else if (statusRes.ok) {
-                    const data = await statusRes.json();
-                    if (data?.risk) {
-                        setRiskStatus(data.risk);
-                    }
-                }
+    const tick = async () => {
+      setError('')
 
-                if (poolsRes.ok) {
-                    const poolsData = await poolsRes.json();
-                    setPools(poolsData?.pools ?? []);
-                }
-
-                if (pnlRes.ok) {
-                    const pnlData = await pnlRes.json();
-                    setPnlSeries(pnlData?.series ?? []);
-                }
-            } catch (err) {
-                console.error('API fetch failed', err);
-            }
-        };
-
-        fetchStatus();
-        const interval = setInterval(fetchStatus, 1500);
-        return () => clearInterval(interval);
-    }, []);
-
-    const binanceClass = systemStatus.binanceConnected ? 'text-green-400' : 'text-yellow-400';
-    const binanceLabel = systemStatus.binanceConnected ? 'Stable' : 'Degraded';
-
-    const togglePause = async () => {
-        setControlError('');
-        const endpoint = paused ? 'resume' : 'pause';
-        try {
-            const res = await fetch(`${API_BASE}/api/control/${endpoint}`, { method: 'POST' });
-            if (!res.ok) {
-                const txt = await res.text();
-                setControlError(txt || 'control failed');
-                return;
-            }
-            setPaused(!paused);
-        } catch (err) {
-            setControlError(err?.message || 'control failed');
+      if (USE_MOCK) {
+        const now = new Date().toISOString()
+        const mockHealth = {
+          bot: { online: true, last_heartbeat_ts: now, latest_block: 0, queue_depth: 0 },
+          rpc: { ok: true, timeout_rate_5m: 0.0, p95_latency_ms: 0 },
+          risk: { mode: 'normal', consecutive_fails: 0, daily_gas_used_eth: 0.0, daily_gas_limit_eth: 0.05 },
         }
-    };
-
-    const triggerCleanup = async () => {
-        setControlError('');
-        try {
-            const res = await fetch(`${API_BASE}/api/control/cleanup`, { method: 'POST' });
-            if (!res.ok) {
-                const txt = await res.text();
-                setControlError(txt || 'cleanup failed');
-                return;
-            }
-            setCleanupInProgress(true);
-        } catch (err) {
-            setControlError(err?.message || 'cleanup failed');
+        const mockPools = [
+          {
+            pool_id: 'mock-pool',
+            chain_id: 421614,
+            pool_address: '0x...',
+            token0: { address: '0x...', symbol: 'WETH', decimals: 18 },
+            token1: { address: '0x...', symbol: 'TUSD', decimals: 6 },
+            fee: 500,
+          },
+        ]
+        const mockState = {
+          pool_id: 'mock-pool',
+          chain_id: 421614,
+          ts: now,
+          dex: { tick: 0, price_stable_per_weth: 2000, liquidity: '0' },
+          cex: { price_stable_per_weth: 2000, source: 'mock' },
+          position: {
+            token_id: '',
+            tick_lower: 0,
+            tick_upper: 0,
+            liquidity: '0',
+            in_range: false,
+            distance_to_lower_pct: 0,
+            distance_to_upper_pct: 0,
+          },
+          strategy: {
+            profile: 'normal',
+            sigma_daily: 0,
+            width_pct: 0.01,
+            vol_window: '1m',
+            cooldown_active: false,
+            min_interval: '30s',
+          },
+          risk: { mode: 'normal', consecutive_fails: 0, rebalances_last_1h: 0 },
         }
-    };
-
-    const setMode = async (mode) => {
-        setControlError('');
-        if (!mode) return;
-        if (!window.confirm(`Switch risk mode to ${mode}?`)) {
-            return;
+        if (!cancelled) {
+          setHealth(mockHealth)
+          setPools(mockPools)
+          setPoolState(mockState)
         }
-        try {
-            const res = await fetch(`${API_BASE}/api/control/riskmode?mode=${encodeURIComponent(mode)}`, { method: 'POST' });
-            if (!res.ok) {
-                const txt = await res.text();
-                setControlError(txt || 'riskmode failed');
-                return;
-            }
-            setRiskMode(mode);
-        } catch (err) {
-            setControlError(err?.message || 'riskmode failed');
-        }
-    };
+        return
+      }
 
-    const triggerRebalance = async () => {
-        setControlError('');
-        if (!window.confirm('Trigger manual rebalance intent?')) {
-            return;
+      if (!adminToken) {
+        if (!cancelled) {
+          setHealth(null)
+          setPools([])
+          setPoolState(null)
         }
-        try {
-            const res = await fetch(`${API_BASE}/api/control/rebalance`, { method: 'POST' });
-            if (!res.ok) {
-                const txt = await res.text();
-                setControlError(txt || 'rebalance failed');
-                return;
-            }
-        } catch (err) {
-            setControlError(err?.message || 'rebalance failed');
+        return
+      }
+
+      try {
+        const h = await apiFetch('/api/v1/health')
+        const p = await apiFetch('/api/v1/pools')
+        const pool0 = p?.pools?.[0]?.pool_id
+        const st = pool0 ? await apiFetch(`/api/v1/pools/${encodeURIComponent(pool0)}/state`) : null
+        if (!cancelled) {
+          setHealth(h)
+          setPools(p?.pools || [])
+          setPoolState(st)
         }
-    };
+      } catch (e) {
+        if (!cancelled) setError(String(e?.message || e))
+      }
+    }
 
-    return (
-        <div className="min-h-screen">
-            <header className="glass-panel p-4 flex justify-between items-center sticky top-0 z-50">
-                <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center font-bold">P</div>
-                    <h1 className="text-xl font-bold tracking-tight">
-                        Phoenix V3
-                        <span className="text-xs text-blue-400 border border-blue-400/30 px-2 py-0.5 rounded-full ml-2">
-                            LIVE
-                        </span>
-                    </h1>
-                </div>
-                <div className="flex flex-col md:flex-row gap-2 md:gap-4 text-sm font-medium text-gray-400 text-right items-end">
-                    <span>ETH Network: <span className="text-green-400">Connected</span></span>
-                    <span>Binance Feed: <span className={binanceClass}>{binanceLabel}</span></span>
-                    <span>Source: <span className="text-blue-300">{systemStatus.priceSource}</span></span>
-                    <button
-                        onClick={togglePause}
-                        className={`px-3 py-1 rounded-md border text-xs font-semibold ${paused ? 'border-yellow-500/50 text-yellow-300 hover:bg-yellow-500/10' : 'border-green-500/50 text-green-300 hover:bg-green-500/10'}`}
-                    >
-                        {paused ? 'RESUME' : 'PAUSE'}
-                    </button>
-                    <button
-                        onClick={triggerCleanup}
-                        disabled={cleanupInProgress}
-                        className={`px-3 py-1 rounded-md border text-xs font-semibold ${cleanupInProgress ? 'border-slate-700/50 text-gray-500' : 'border-red-500/50 text-red-300 hover:bg-red-500/10'}`}
-                    >
-                        {cleanupInProgress ? 'CLEANUP…' : 'CLEANUP'}
-                    </button>
-                    <select
-                        value={riskMode}
-                        onChange={(e) => setMode(e.target.value)}
-                        className="px-2 py-1 rounded-md border border-slate-700/50 bg-slate-900 text-xs text-gray-200"
-                    >
-                        <option value="normal">risk: normal</option>
-                        <option value="caution">risk: caution</option>
-                        <option value="frozen">risk: frozen</option>
-                    </select>
-                </div>
-            </header>
+    tick()
+    const interval = setInterval(tick, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [adminToken, authHeader])
 
-            {controlError && (
-                <div className="mx-4 mt-3 p-2 text-xs rounded bg-red-900/30 border border-red-500/40 text-red-200">
-                    {controlError}
-                </div>
+  return (
+    <div className="min-h-screen">
+      <header className="glass-panel p-4 flex justify-between items-center sticky top-0 z-50">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center font-bold">P</div>
+          <h1 className="text-xl font-bold tracking-tight">
+            Phoenix V3
+            <span className="text-xs text-blue-400 border border-blue-400/30 px-2 py-0.5 rounded-full ml-2">
+              READ-ONLY
+            </span>
+            {USE_MOCK && (
+              <span className="text-xs text-yellow-300 border border-yellow-400/30 px-2 py-0.5 rounded-full ml-2">
+                MOCK
+              </span>
             )}
-
-            <main className="p-6 max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="card col-span-1 md:col-span-2">
-                    <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">Market Overview</h2>
-                    <div className="flex items-end gap-2 mb-6">
-                        <span className="text-5xl font-bold text-white">${ticker.price.toFixed(2)}</span>
-                        <span className="text-green-400 mb-1">+0.05%</span>
-                    </div>
-
-                    <div className="relative h-12 bg-slate-800 rounded-lg overflow-hidden flex items-center px-4">
-                        <div className="absolute top-1/2 left-[10%] w-[80%] h-1 bg-slate-600 -translate-y-1/2 rounded-full"></div>
-                        <div
-                            className="absolute top-1/2 h-2 bg-blue-500 -translate-y-1/2 rounded-full transition-all duration-500"
-                            style={{
-                                left: `${((engineState.lower - 1000) / 2000) * 100}%`,
-                                width: `${((engineState.upper - engineState.lower) / 2000) * 100}%`
-                            }}
-                        ></div>
-                        <div className="absolute top-1/2 left-1/2 w-4 h-4 bg-white rounded-full border-4 border-slate-900 -translate-y-1/2 -translate-x-1/2 z-10 shadow-lg shadow-blue-500/50"></div>
-                    </div>
-                    <div className="flex justify-between mt-2 text-xs text-gray-400">
-                        <span>Low: {engineState.lower}</span>
-                        <span>Target: {engineState.upper}</span>
-                    </div>
-                </div>
-
-                <div className="card">
-                    <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">Engine State</h2>
-                    <div className="space-y-4">
-                        <div className="flex justify-between p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
-                            <span className="text-gray-400">Current Tick</span>
-                            <span className="font-mono text-blue-300">201020</span>
-                        </div>
-                        <div className="flex justify-between p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
-                            <span className="text-gray-400">Target Tick</span>
-                            <span className="font-mono text-blue-300">201050</span>
-                        </div>
-                        <div className="mt-6">
-                            <button onClick={triggerRebalance} className="btn-primary w-full py-3">Rebalance Now</button>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="card col-span-1 md:col-span-3">
-                    <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">Intent Queue</h2>
-                    {intentCount > 0 ? (
-                        <div className="text-center py-6 text-white">
-                            <p className="text-4xl font-bold">{intentCount}</p>
-                            <p className="text-gray-400 mt-2">pending intents awaiting execution</p>
-                        </div>
-                    ) : (
-                        <div className="text-center py-10 text-gray-500 italic">
-                            No pending intents. System is idling.
-                        </div>
-                    )}
-                </div>
-
-                <div className="card col-span-1 md:col-span-3">
-                    <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">Recent Trades</h2>
-                    {recentTrades.length === 0 ? (
-                        <div className="text-center py-6 text-gray-500 italic">No trades yet.</div>
-                    ) : (
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                                <thead className="text-gray-400">
-                                    <tr>
-                                        <th className="text-left py-2">Time</th>
-                                        <th className="text-left py-2">Type</th>
-                                        <th className="text-left py-2">Pool</th>
-                                        <th className="text-left py-2">Status</th>
-                                        <th className="text-left py-2">Gas (native)</th>
-                                        <th className="text-left py-2">Swap Details</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="text-gray-200">
-                                    {recentTrades.map((t) => (
-                                        <tr key={t.tx_hash} className="border-t border-slate-700/50">
-                                            <td className="py-2">{new Date(t.time).toLocaleString()}</td>
-                                            <td className="py-2">{t.type}</td>
-                                            <td className="py-2">{t.pool_id}</td>
-                                            <td className="py-2">{t.status}</td>
-                                            <td className="py-2 font-mono">{(t.gas_cost_native ?? 0).toFixed(6)}</td>
-                                            <td className="py-2 font-mono max-w-[420px]">
-                                                {t.swap_details ? (
-                                                    (() => {
-                                                        try {
-                                                            const swaps = JSON.parse(t.swap_details);
-                                                            return swaps.map((s, idx) => (
-                                                                <div key={idx} className="truncate">
-                                                                    {s.from_token?.slice(0, 6)}→{s.to_token?.slice(0, 6)} in {s.amount_in} out {s.actual_out || '?'} slip {(s.slippage_pct * 100).toFixed(2)}%
-                                                                </div>
-                                                            ));
-                                                        } catch {
-                                                            return <div className="truncate">invalid swap_details</div>;
-                                                        }
-                                                    })()
-                                                ) : (
-                                                    '-'
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-                </div>
-
-                <div className="card col-span-1 md:col-span-3">
-                    <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">Risk Status</h2>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-                        <div className="p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
-                            <div className="text-gray-400">Mode</div>
-                            <div className="mt-1 font-semibold text-white">{riskStatus.mode}</div>
-                        </div>
-                        <div className="p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
-                            <div className="text-gray-400">Daily Gas Used</div>
-                            <div className="mt-1 font-mono text-white">
-                                {(riskStatus.dailyGasUsed ?? 0).toFixed(6)} / {(riskStatus.maxDailyGas ?? 0).toFixed(3)}
-                            </div>
-                        </div>
-                        <div className="p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
-                            <div className="text-gray-400">Daily Swap Volume (USD)</div>
-                            <div className="mt-1 font-mono text-white">
-                                {(riskStatus.dailySwapVolUsd ?? 0).toFixed(2)} / {(riskStatus.maxDailySwapVol ?? 0).toFixed(2)}
-                            </div>
-                        </div>
-                        <div className="p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
-                            <div className="text-gray-400">Daily Swap Count</div>
-                            <div className="mt-1 font-mono text-white">
-                                {riskStatus.dailySwapCount ?? 0} / {riskStatus.maxDailySwaps ?? 0}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="card col-span-1 md:col-span-3">
-                    <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">Pools</h2>
-                    {pools.length === 0 ? (
-                        <div className="text-center py-6 text-gray-500 italic">No pool snapshot yet.</div>
-                    ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {pools.map((p) => (
-                                <div key={p.pool_id} className="p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
-                                    <div className="flex justify-between text-sm">
-                                        <div className="font-semibold text-white">{p.pool_id}</div>
-                                        <div className="text-gray-400">chain {p.chain_id}</div>
-                                    </div>
-                                    {poolGuardMap[p.pool_id] && (
-                                        <div className="mt-1 text-xs">
-                                            <span className={poolGuardMap[p.pool_id].risk === 'danger' ? 'text-red-400' : poolGuardMap[p.pool_id].risk === 'warning' ? 'text-yellow-400' : 'text-green-400'}>
-                                                {poolGuardMap[p.pool_id].risk}
-                                            </span>
-                                            <span className="text-gray-500 ml-2 truncate">{poolGuardMap[p.pool_id].reason}</span>
-                                        </div>
-                                    )}
-                                    <div className="mt-2 text-xs text-gray-300 space-y-1">
-                                        <div>Dex Price: {Number(p.dex_price).toFixed(6)}</div>
-                                        <div>Tick: {p.current_tick}</div>
-                                        <div>Liquidity: {p.liquidity}</div>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
-
-                <div className="card col-span-1 md:col-span-3">
-                    <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">PnL (Daily)</h2>
-                    {pnlSeries.length === 0 ? (
-                        <div className="text-center py-6 text-gray-500 italic">PnL series not available yet.</div>
-                    ) : (
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                                <thead className="text-gray-400">
-                                    <tr>
-                                        <th className="text-left py-2">Day</th>
-                                        <th className="text-left py-2">PnL (USD)</th>
-                                        <th className="text-left py-2">Gas (native)</th>
-                                        <th className="text-left py-2">Net (USD)</th>
-                                        <th className="text-left py-2">Trades</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="text-gray-200">
-                                    {pnlSeries.map((p) => (
-                                        <tr key={p.day} className="border-t border-slate-700/50">
-                                            <td className="py-2">{new Date(p.day).toLocaleDateString()}</td>
-                                            <td className="py-2 font-mono">{(p.pnl_usd ?? 0).toFixed(2)}</td>
-                                            <td className="py-2 font-mono">{(p.gas_native ?? 0).toFixed(6)}</td>
-                                            <td className="py-2 font-mono">{(p.net_pnl_usd ?? 0).toFixed(2)}</td>
-                                            <td className="py-2">{p.trade_count}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                            <div className="text-xs text-gray-500 mt-2">Note: PnL is 0 until executor fills TradeRecord.PnL.</div>
-                        </div>
-                    )}
-                </div>
-            </main>
+          </h1>
         </div>
-    );
+
+        <div className="flex flex-col md:flex-row gap-2 md:gap-4 text-sm font-medium text-gray-300 text-right items-end">
+          {!USE_MOCK && (
+            <input
+              value={adminToken}
+              onChange={(e) => setAdminToken(e.target.value)}
+              placeholder="ADMIN_TOKEN (session)"
+              className="px-2 py-1 rounded-md border border-slate-700/50 bg-slate-900 text-xs text-gray-200 w-56"
+            />
+          )}
+          <span>
+            API: <span className="text-blue-300">{API_BASE}</span>
+          </span>
+          <span>
+            BOT:{' '}
+            <span className={health?.bot?.online ? 'text-green-400' : 'text-yellow-400'}>
+              {health?.bot?.online ? 'online' : 'offline'}
+            </span>
+          </span>
+          <span>
+            RISK: <span className="text-blue-300">{health?.risk?.mode || 'unknown'}</span>
+          </span>
+        </div>
+      </header>
+
+      {error && (
+        <div className="mx-4 mt-3 p-2 text-xs rounded bg-red-900/30 border border-red-500/40 text-red-200">
+          {error}
+        </div>
+      )}
+
+      {!USE_MOCK && !adminToken && (
+        <div className="mx-4 mt-3 p-2 text-xs rounded bg-slate-900/30 border border-slate-700/40 text-gray-200">
+          Set <code>ADMIN_TOKEN</code> to use <code>/api/v1/*</code> read APIs.
+        </div>
+      )}
+
+      <main className="p-6 max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="glass-card rounded-xl p-6 col-span-1 md:col-span-2">
+          <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">Health</h2>
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="p-3 bg-slate-800/40 rounded-lg border border-slate-700/50">
+              <div className="text-gray-400">Queue Depth</div>
+              <div className="text-white font-mono">{health?.bot?.queue_depth ?? '-'}</div>
+            </div>
+            <div className="p-3 bg-slate-800/40 rounded-lg border border-slate-700/50">
+              <div className="text-gray-400">RPC OK</div>
+              <div className="text-white font-mono">{String(health?.rpc?.ok ?? '-')}</div>
+            </div>
+            <div className="p-3 bg-slate-800/40 rounded-lg border border-slate-700/50">
+              <div className="text-gray-400">Consecutive Fails</div>
+              <div className="text-white font-mono">{health?.risk?.consecutive_fails ?? '-'}</div>
+            </div>
+            <div className="p-3 bg-slate-800/40 rounded-lg border border-slate-700/50">
+              <div className="text-gray-400">Daily Gas (ETH)</div>
+              <div className="text-white font-mono">
+                {health?.risk?.daily_gas_used_eth ?? 0} / {health?.risk?.daily_gas_limit_eth ?? 0}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="glass-card rounded-xl p-6">
+          <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">Pools</h2>
+          <div className="space-y-2 text-xs">
+            {(pools || []).map((p) => (
+              <div key={p.pool_id} className="p-3 bg-slate-800/40 rounded-lg border border-slate-700/50">
+                <div className="flex justify-between">
+                  <div className="text-white font-semibold">{p.pool_id}</div>
+                  <div className="text-gray-400">{p.chain_id}</div>
+                </div>
+                <div className="text-gray-300 mt-1">
+                  {p.token0?.symbol}/{p.token1?.symbol} fee={p.fee}
+                </div>
+              </div>
+            ))}
+            {(!pools || pools.length === 0) && <div className="text-gray-400">No pools</div>}
+          </div>
+        </div>
+
+        <div className="glass-card rounded-xl p-6 col-span-1 md:col-span-3">
+          <h2 className="text-gray-400 text-sm uppercase tracking-wider mb-4">Pool State</h2>
+          {!poolState ? (
+            <div className="text-gray-400 text-sm">No state</div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+              <div className="p-3 bg-slate-800/40 rounded-lg border border-slate-700/50">
+                <div className="text-gray-400">DEX Price (stable/WETH)</div>
+                <div className="text-white font-mono">{poolState?.dex?.price_stable_per_weth ?? '-'}</div>
+              </div>
+              <div className="p-3 bg-slate-800/40 rounded-lg border border-slate-700/50">
+                <div className="text-gray-400">Tick</div>
+                <div className="text-white font-mono">{poolState?.dex?.tick ?? '-'}</div>
+              </div>
+              <div className="p-3 bg-slate-800/40 rounded-lg border border-slate-700/50">
+                <div className="text-gray-400">In Range</div>
+                <div className="text-white font-mono">{String(poolState?.position?.in_range ?? '-')}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  )
 }
 
-export default App;

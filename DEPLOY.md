@@ -2,6 +2,11 @@
 
 本文档将指导您如何启动 Phoenix V3 系统，包括 Go 后端 (Bot) 和 React 前端 (Dashboard)。
 
+重要说明（安全与网络）：
+- 默认目标网络：**Arbitrum Sepolia**（`chainId=421614`），仅测试网演练。
+- 广播交易默认禁用：`dry_run=true`、`kill_switch=true`、`allow_tx_broadcast=false`；任何广播必须显式解锁并遵循 `docs/runbook/testnet.md`。
+- 本文档中的 `configs/config.yaml`（Ethereum Sepolia 11155111）主要用于本地/历史演练；以 Arbitrum Sepolia 为准请使用 `configs/config_arbitrum_sepolia.template.yaml` + `docs/runbook/testnet.md`。
+
 ## 1. 启动后端 (Bot)
 
 后端负责连接交易所、计算策略、风险控制和执行交易。
@@ -17,7 +22,7 @@ export BOT_PRIVATE_KEY="0xYOUR_TESTNET_KEY"
 # 可选：export SUPABASE_DB_URL="postgres://USER:PASSWORD@HOST:5432/postgres?sslmode=require"
 
 # 3. 编译项目
-go build -o bot ./cmd/bot/main.go
+go build -o bot ./cmd/bot
 
 # 4. 运行 Bot
 ./bot
@@ -139,10 +144,14 @@ npm run dev
 ## 5. 常见问题
 
 *   **Q: 为什么价格不更新？**
-    *   A: 请确保后端 `./bot` 正在运行，并且没有因为错误退出。前端依赖 `http://localhost:8081` 的 API。
+    *   A: 请确保后端 `./bot` 正在运行，并且没有因为错误退出。前端依赖 `http://localhost:8081` 的 `/api/v1/*`（需要 `ADMIN_TOKEN`），或使用 `VITE_USE_MOCK=1` 运行前端 mock 模式。
 
 *   **Q: 如何连接真实钱包？**
-    *   A: 修改 `configs/config.yaml` 中的 RPC 地址，并在环境变量或配置中填入真实私钥（注意安全）。将 `dry_run` 改为 `false`。
+    *   A: 仅建议测试网。广播交易默认禁用，除非同时满足：
+        - `strategy.dry_run: false`
+        - `safety.kill_switch: false`
+        - `safety.allow_tx_broadcast: true`
+      私钥只允许通过环境变量提供（例如 `BOT_PRIVATE_KEY`），禁止写入代码/配置/日志。
 
 *   **Q: 为什么显示 "Simulated Tx Execution"?**
     *   A: 默认配置为 `dry_run: true`，处于影子模式，不会消耗真实 Gas。
