@@ -8,7 +8,9 @@ phoenix.db
 *.db-journal
 
 # Build artifacts
-bot
+/bot
+!/bot/
+!/bot/**
 bin/
 *.exe
 *.out
@@ -18,6 +20,7 @@ bin/
 .venv/
 .gocache/
 .gomodcache/
+.phoenix_secrets
 **/__pycache__/
 scripts/__pycache__/
 
