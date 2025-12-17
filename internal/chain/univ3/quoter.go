@@ -63,4 +63,3 @@ func (q *Quoter) QuoteExactInputSingle(ctx context.Context, caller Caller, token
 	}
 	return amountOut, nil
 }
-

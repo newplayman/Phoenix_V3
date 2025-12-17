@@ -1,6 +1,19 @@
-# Arbitrum One Real Trading Config
+# Arbitrum One (mainnet) config.
+# Safety gate: the bot refuses to run with chainId=42161 unless you set:
+#   PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE=1
 schema_version: "2024-07-01"
 strategy_version: "basic-v1"
+
+api:
+  enable_legacy: false
+  control_plane_enabled: false
+  cors_allowed_origins:
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+
+safety:
+  kill_switch: true
+  allow_tx_broadcast: false
 
 events:
   driver: "memory"
@@ -43,7 +56,7 @@ pools:
 
 strategy:
   name: "basic_rebalance"
-  dry_run: false # REAL TRADING
+  dry_run: true # SAFE DEFAULT (no broadcasts)
   params:
     threshold: 0.05
 

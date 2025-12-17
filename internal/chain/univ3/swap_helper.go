@@ -71,4 +71,3 @@ func (h *SwapHelper) BuildSwapData(pool common.Address, action rebalancer.SwapAc
 		new(big.Int), // uint160(0)
 	)
 }
-
