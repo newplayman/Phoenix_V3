@@ -10,7 +10,6 @@
 1) **Mock-LP（推荐 / 可复现）**：部署一套“最小可用 mock”合约（ERC20 + Mock PositionManager + Mock Pool），用 Phoenix 的同一套 calldata/审批/审计链路跑通 `approve → mint`。
    - 目的：验证 Phoenix 的“交易构建/nonce/重试/审计/回执记录”闭环，而不依赖真实 Uniswap V3 Periphery 在 testnet 的部署情况。
    - 注意：这不是 Uniswap V3 的真实 LP，链上数据仅用于 Phoenix plumbing 验证。
-   - 说明：Phoenix 会在发送 `mint` 之前自动做 ERC20 `approve`（若需要）；`approve` 会作为 intent steps 记录（`step_type=approve`，status=skipped/sent/mined/failed）。
 
 2) **Real UniV3（可选）**：如果你提供 Arbitrum Sepolia 上真实可用的 `NonfungiblePositionManager` + pool + tokens 地址，并且 `scripts/check_contract_code.sh` 证明有代码，才执行真实 LP 交易。
 
@@ -86,12 +85,17 @@ export ARBITRUM_SEPOLIA_RPC_URL='https://arbitrum-sepolia.infura.io/v3/...'
 export BOT_PRIVATE_KEY_FILE="$HOME/.config/phoenix/bot_private_key.txt"
 export PHOENIX_CONTROL_PLANE_ENABLED=1
 export ADMIN_TOKEN='testtoken'
+export PHOENIX_DB_PATH='/tmp/phoenix_mock_lp_e2e.sqlite' # 避免复用旧状态，保证可重复
 
 export MOCKLP_E2E_CONFIRM=I_UNDERSTAND_GAS_COSTS
 scripts/rehearsal_arbitrum_sepolia_mock_lp_e2e.sh
 ```
 
 脚本会输出关键 tx hash（approve + mint）并在最后用 `make tx-verify` 校验 mined 状态。
+
+额外验证（推荐）：
+- 脚本会在输出中显示 `position_token_id`（来自 PositionManager 的 ERC721 `Transfer` 事件解析），用于确认“确实 mint 了一个 position NFT（mock）”。
+- 如果你设置了 `MOCKLP_REUSE_EXISTING=1` 并复用旧部署，而旧合约未发出 `Transfer`，可能看不到 `position_token_id`；此时删除 `/tmp/phoenix_mock_lp_stack.json` 或不设置 `MOCKLP_REUSE_EXISTING` 重新部署即可。
 
 ---
 

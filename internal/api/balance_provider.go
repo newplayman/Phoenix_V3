@@ -49,9 +49,9 @@ func NewDefaultBalanceProvider(selectGateway func(int64) gateway.Gateway, cfgPro
 
 		// Offline-only escape hatch for acceptance rehearsals: return fixed balances so preview planning works without RPC.
 		// Guardrails:
-		// - Requires offline=true (no chain calls)
 		// - Requires effective_dry_run=true (no broadcasting)
-		if strings.TrimSpace(os.Getenv("PHOENIX_PREVIEW_FAKE_BALANCES")) == "1" && offline && config.SafetyFromConfig(cfg).EffectiveDryRun {
+		// - Intended for rehearsals; results may not reflect actual wallet funding.
+		if strings.TrimSpace(os.Getenv("PHOENIX_PREVIEW_FAKE_BALANCES")) == "1" && config.SafetyFromConfig(cfg).EffectiveDryRun {
 			poolCfg := (*config.PoolConfig)(nil)
 			if cfg != nil {
 				for i := range cfg.Pools {

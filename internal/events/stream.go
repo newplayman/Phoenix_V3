@@ -8,12 +8,13 @@ import (
 type Topic string
 
 const (
-	TopicTicker     Topic = "ticker"
-	TopicPoolState  Topic = "pool_state"
-	TopicIntentExec Topic = "intent_exec"
-	TopicStrategy   Topic = "strategy"
-	TopicRisk       Topic = "risk"
-	TopicAudit      Topic = "audit"
+	TopicTicker       Topic = "ticker"
+	TopicPoolState    Topic = "pool_state"
+	TopicIntentExec   Topic = "intent_exec"
+	TopicStrategy     Topic = "strategy"
+	TopicRisk         Topic = "risk"
+	TopicAudit        Topic = "audit"
+	TopicOrderbookRaw Topic = "orderbook_raw"
 )
 
 type Event struct {

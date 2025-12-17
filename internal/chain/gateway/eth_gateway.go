@@ -212,6 +212,7 @@ func (g *EthGateway) BalanceOfERC20(ctx context.Context, token common.Address) (
 	return bal, nil
 }
 
+// EnsureAllowance checks if spender has enough allowance, otherwise sends Approve tx
 // EnsureAllowanceTx checks if spender has enough allowance, otherwise sends an Approve tx.
 // Returns (txHash, minedReceipt, err). If allowance is already sufficient, returns zero hash and nil receipt.
 func (g *EthGateway) EnsureAllowanceTx(ctx context.Context, token, spender common.Address, amount *big.Int) (common.Hash, *types.Receipt, error) {
@@ -267,27 +268,53 @@ func (g *EthGateway) EnsureAllowanceTx(ctx context.Context, token, spender commo
 	var lastHash common.Hash
 	var lastErr error
 	for attempt := 0; attempt < g.maxRetries; attempt++ {
-		gasPrice, err := g.client.SuggestGasPrice(approveCtx)
-		if err != nil {
-			lastErr = err
-			continue
+		// EIP-1559 fees (Arbitrum Sepolia can reject legacy txs with gasPrice < baseFee).
+		header, herr := g.client.HeaderByNumber(approveCtx, nil)
+		baseFee := (*big.Int)(nil)
+		if herr == nil && header != nil {
+			baseFee = header.BaseFee
 		}
+		if baseFee == nil || baseFee.Sign() <= 0 {
+			// Fallback: use suggested "gas price" as an approximation.
+			baseFee, _ = g.client.SuggestGasPrice(approveCtx)
+		}
+		tip, terr := g.client.SuggestGasTipCap(approveCtx)
+		if terr != nil || tip == nil || tip.Sign() <= 0 {
+			tip = big.NewInt(1_000_000_000) // 1 gwei default
+		}
+		feeCap := new(big.Int).Add(new(big.Int).Mul(baseFee, big.NewInt(2)), tip)
 
-		adjPrice := new(big.Int).Set(gasPrice)
+		// Apply multiplier and bump on retries.
 		if g.gasMultiplier != 1.0 {
 			mul := big.NewFloat(g.gasMultiplier)
-			f, _ := new(big.Float).SetInt(adjPrice).Mul(new(big.Float).SetInt(adjPrice), mul).Int(nil)
-			adjPrice = f
+			feeCap, _ = new(big.Float).Mul(new(big.Float).SetInt(feeCap), mul).Int(nil)
+			tip, _ = new(big.Float).Mul(new(big.Float).SetInt(tip), mul).Int(nil)
 		}
 		if attempt > 0 {
 			// Use a larger bump for replacements to satisfy "replacement transaction underpriced".
 			bump := big.NewFloat(1 + (g.gasBumpPct+0.20)*float64(attempt))
-			f, _ := new(big.Float).SetInt(adjPrice).Mul(new(big.Float).SetInt(adjPrice), bump).Int(nil)
-			adjPrice = f
+			feeCap, _ = new(big.Float).Mul(new(big.Float).SetInt(feeCap), bump).Int(nil)
+			tip, _ = new(big.Float).Mul(new(big.Float).SetInt(tip), bump).Int(nil)
 		}
 
-		tx := types.NewTransaction(nonce, token, big.NewInt(0), 100000, adjPrice, approveData)
-		signedTx, err := types.SignTx(tx, types.NewEIP155Signer(g.chainID), g.wallet.PrivateKey)
+		// Estimate approve gas with headroom.
+		gasLimit := uint64(120_000)
+		msg := ethereum.CallMsg{From: g.wallet.Address, To: &token, Data: approveData}
+		if est, err := g.client.EstimateGas(approveCtx, msg); err == nil && est > 0 {
+			gasLimit = uint64(est + est/5 + 10_000) // +20% + 10k
+		}
+
+		tx := types.NewTx(&types.DynamicFeeTx{
+			ChainID:   new(big.Int).Set(g.chainID),
+			Nonce:     nonce,
+			To:        &token,
+			Value:     big.NewInt(0),
+			Gas:       gasLimit,
+			GasFeeCap: feeCap,
+			GasTipCap: tip,
+			Data:      approveData,
+		})
+		signedTx, err := types.SignTx(tx, types.NewLondonSigner(g.chainID), g.wallet.PrivateKey)
 		if err != nil {
 			return common.Hash{}, nil, err
 		}
@@ -295,7 +322,7 @@ func (g *EthGateway) EnsureAllowanceTx(ctx context.Context, token, spender commo
 		if err := g.client.SendTransaction(approveCtx, signedTx); err != nil {
 			lastErr = err
 			msg := err.Error()
-			if strings.Contains(msg, "replacement transaction underpriced") {
+			if strings.Contains(msg, "replacement transaction underpriced") || strings.Contains(strings.ToLower(msg), "underpriced") || strings.Contains(strings.ToLower(msg), "fee cap too low") || strings.Contains(strings.ToLower(msg), "max fee per gas") {
 				continue
 			}
 			if strings.Contains(msg, "nonce") {
@@ -376,6 +403,7 @@ func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResul
 		}
 	}
 
+	gasLimit := uint64(800_000)
 	if g.preflight {
 		msg := ethereum.CallMsg{
 			From:  g.wallet.Address,
@@ -383,8 +411,12 @@ func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResul
 			Value: value,
 			Data:  callData,
 		}
-		if _, err := g.client.EstimateGas(ctx, msg); err != nil {
+		est, err := g.client.EstimateGas(ctx, msg)
+		if err != nil {
 			return nil, fmt.Errorf("gateway: preflight estimateGas failed (intent=%s to=%s): %w", intent.ID, toAddr.Hex(), err)
+		}
+		if est > 0 {
+			gasLimit = uint64(est + est/5 + 50_000) // +20% + 50k
 		}
 	}
 
@@ -394,27 +426,44 @@ func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResul
 	nonce := g.nonce
 	var lastErr error
 	for attempt := 0; attempt < g.maxRetries; attempt++ {
-
-		gasPrice, err := g.client.SuggestGasPrice(ctx)
-		if err != nil {
-			lastErr = fmt.Errorf("gas price error: %w", err)
-			continue
+		// EIP-1559 fees (Arbitrum Sepolia can reject legacy gasPrice < baseFee).
+		header, herr := g.client.HeaderByNumber(ctx, nil)
+		baseFee := (*big.Int)(nil)
+		if herr == nil && header != nil {
+			baseFee = header.BaseFee
 		}
+		if baseFee == nil || baseFee.Sign() <= 0 {
+			baseFee, _ = g.client.SuggestGasPrice(ctx)
+		}
+		tip, terr := g.client.SuggestGasTipCap(ctx)
+		if terr != nil || tip == nil || tip.Sign() <= 0 {
+			tip = big.NewInt(1_000_000_000) // 1 gwei default
+		}
+		feeCap := new(big.Int).Add(new(big.Int).Mul(baseFee, big.NewInt(2)), tip)
+
 		// Apply multiplier and bump on retries.
-		adjPrice := new(big.Int).Set(gasPrice)
 		if g.gasMultiplier != 1.0 {
 			mul := big.NewFloat(g.gasMultiplier)
-			f, _ := new(big.Float).SetInt(adjPrice).Mul(new(big.Float).SetInt(adjPrice), mul).Int(nil)
-			adjPrice = f
+			feeCap, _ = new(big.Float).Mul(new(big.Float).SetInt(feeCap), mul).Int(nil)
+			tip, _ = new(big.Float).Mul(new(big.Float).SetInt(tip), mul).Int(nil)
 		}
 		if attempt > 0 {
 			bump := big.NewFloat(1 + g.gasBumpPct*float64(attempt))
-			f, _ := new(big.Float).SetInt(adjPrice).Mul(new(big.Float).SetInt(adjPrice), bump).Int(nil)
-			adjPrice = f
+			feeCap, _ = new(big.Float).Mul(new(big.Float).SetInt(feeCap), bump).Int(nil)
+			tip, _ = new(big.Float).Mul(new(big.Float).SetInt(tip), bump).Int(nil)
 		}
 
-		tx := types.NewTransaction(nonce, toAddr, value, 800000, adjPrice, callData)
-		signedTx, err := types.SignTx(tx, types.NewEIP155Signer(g.chainID), g.wallet.PrivateKey)
+		tx := types.NewTx(&types.DynamicFeeTx{
+			ChainID:   new(big.Int).Set(g.chainID),
+			Nonce:     nonce,
+			To:        &toAddr,
+			Value:     value,
+			Gas:       gasLimit,
+			GasFeeCap: feeCap,
+			GasTipCap: tip,
+			Data:      callData,
+		})
+		signedTx, err := types.SignTx(tx, types.NewLondonSigner(g.chainID), g.wallet.PrivateKey)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to sign tx: %w", err)
 			continue
@@ -430,7 +479,8 @@ func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResul
 				}
 			}
 			// Replacement errors retry with the same nonce but higher gas.
-			if strings.Contains(msg, "replacement transaction underpriced") {
+			lmsg := strings.ToLower(msg)
+			if strings.Contains(msg, "replacement transaction underpriced") || strings.Contains(lmsg, "underpriced") || strings.Contains(lmsg, "fee cap too low") || strings.Contains(lmsg, "max fee per gas") {
 				// keep nonce
 			}
 			backoff := time.Duration(g.retryBackoffMs*(attempt+1)) * time.Millisecond
@@ -443,7 +493,7 @@ func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResul
 			}
 		}
 
-		log.Printf("[Gateway] Sent Intent %s Tx=%s Nonce=%d GasPrice=%s", intent.ID, signedTx.Hash().Hex(), nonce, adjPrice.String())
+		log.Printf("[Gateway] Sent Intent %s Tx=%s Nonce=%d Gas=%d", intent.ID, signedTx.Hash().Hex(), nonce, gasLimit)
 		if nonce >= g.nonce {
 			g.nonce = nonce + 1
 		}
@@ -465,7 +515,7 @@ func (g *EthGateway) waitReceipt(hash common.Hash) {
 	// Best-effort read tx details once.
 	if tx, _, err := g.client.TransactionByHash(ctx, hash); err == nil && tx != nil {
 		nonce = tx.Nonce()
-		from, err := types.Sender(types.NewEIP155Signer(g.chainID), tx)
+		from, err := types.Sender(types.LatestSignerForChainID(g.chainID), tx)
 		if err == nil {
 			fromAddr = from
 		}

@@ -71,14 +71,9 @@ fi
 
 LOG_PATH="${LOG_PATH:-/tmp/phoenix_accept_control_plane_v1.log}"
 OUT_INTENT_ID_FILE="${OUT_INTENT_ID_FILE:-}"
-OUT_BOT_PID_FILE="${OUT_BOT_PID_FILE:-}"
-KEEP_BOT_RUNNING="${KEEP_BOT_RUNNING:-}"
 PID=""
 
 cleanup() {
-  if [[ -n "${KEEP_BOT_RUNNING}" ]]; then
-    return
-  fi
   if [[ -n "${PID}" ]]; then
     kill "${PID}" >/dev/null 2>&1 || true
     wait "${PID}" >/dev/null 2>&1 || true
@@ -105,9 +100,6 @@ if [[ -z "$SKIP_START_BOT" ]]; then
   # shellcheck disable=SC2086
   "$BOT_BIN" $BOT_FLAGS >"$LOG_PATH" 2>&1 &
   PID="$!"
-  if [[ -n "${OUT_BOT_PID_FILE}" ]]; then
-    echo "${PID}" >"${OUT_BOT_PID_FILE}"
-  fi
 else
   if ! port_in_use; then
     echo "SKIP_START_BOT=1 but port 8081 is not listening; start the bot first" >&2
@@ -147,13 +139,14 @@ echo "[accept] waiting for pool state ..."
 for _ in {1..240}; do
   state="$(curl -sS "${auth_header[@]}" "$API_BASE/api/v1/pools/${POOL_ID}/state" || true)"
   price="$(jq -r '.dex.price_stable_per_weth // 0' <<<"$state" 2>/dev/null || echo 0)"
-  if [[ "${price}" != "0" && "${price}" != "0.0" && "${price}" != "null" ]]; then
+  cex="$(jq -r '.cex.price_stable_per_weth // 0' <<<"$state" 2>/dev/null || echo 0)"
+  if [[ "${price}" != "0" && "${price}" != "0.0" && "${price}" != "null" && "${cex}" != "0" && "${cex}" != "0.0" && "${cex}" != "null" ]]; then
     break
   fi
   sleep 0.5
 done
 state="$(curl -sS "${auth_header[@]}" "$API_BASE/api/v1/pools/${POOL_ID}/state" || true)"
-curl -sS "${auth_header[@]}" "$API_BASE/api/v1/pools/${POOL_ID}/state" | jq -e '.pool_id == "'"$POOL_ID"'" and .dex.price_stable_per_weth > 0' >/dev/null || {
+curl -sS "${auth_header[@]}" "$API_BASE/api/v1/pools/${POOL_ID}/state" | jq -e '.pool_id == "'"$POOL_ID"'" and .dex.price_stable_per_weth > 0 and .cex.price_stable_per_weth > 0' >/dev/null || {
   echo "[accept] pool state not ready: $state" >&2
   exit 1
 }
@@ -172,12 +165,13 @@ preview_payload="$(jq -n \
   '{action_type:$action,pool_id:$pool,chain_id:$chain,params:{},idempotency_key:$ikey}')"
 
 echo "[accept] preview (idempotent) ..."
-op1="$(curl -sS "${auth_header[@]}" -H "Content-Type: application/json" -d "$preview_payload" "$API_BASE/api/v1/operations/preview" | jq -r '.operation_id')"
+preview_resp="$(curl -sS "${auth_header[@]}" -H "Content-Type: application/json" -d "$preview_payload" "$API_BASE/api/v1/operations/preview" || true)"
+op1="$(jq -r '.operation_id // ""' <<<"$preview_resp" 2>/dev/null || true)"
 if [[ -z "$op1" || "$op1" == "null" ]]; then
-  echo "[accept] missing operation_id from preview" >&2
+  echo "[accept] missing operation_id from preview; response: $preview_resp" >&2
   exit 1
 fi
-op2="$(curl -sS "${auth_header[@]}" -H "Content-Type: application/json" -d "$preview_payload" "$API_BASE/api/v1/operations/preview" | jq -r '.operation_id')"
+op2="$(curl -sS "${auth_header[@]}" -H "Content-Type: application/json" -d "$preview_payload" "$API_BASE/api/v1/operations/preview" | jq -r '.operation_id // ""')"
 if [[ "$op2" != "$op1" ]]; then
   echo "[accept] preview idempotency failed: $op1 != $op2" >&2
   exit 1

@@ -304,7 +304,6 @@ Keepalive:
   "details": { "from": "0x..", "to": "0x..", "amount_in_raw": "..." }
 }
 ```
-
 ---
 
 ## 4) 必须的服务端校验清单（与前端无关）

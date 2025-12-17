@@ -15,6 +15,7 @@
 - **数据源**:
   - mock 模式：`VITE_USE_MOCK=1`
   - 真实后端：`/api/v1/health`、`/api/v1/pools`、`/api/v1/pools/{pool_id}/state`
+  - 只读执行追踪：`/api/v1/intents`、`/api/v1/intents/{intent_id}`（仅展示 steps/tx_hash；不触发写操作）
 
 ## 3. 目录结构
 ```
@@ -37,6 +38,11 @@ web/
   - `GET /api/v1/health`
   - `GET /api/v1/pools`
   - `GET /api/v1/pools/{pool_id}/state`
+  - `GET /api/v1/intents?pool_id=&limit=`
+  - `GET /api/v1/intents/{intent_id}`（显示 steps 与 tx 链接；用于对照链上执行）
+  - `GET /api/v1/tx?pool_id=&limit=`（展示 tx 列表）
+  - `GET /api/v1/audit?pool_id=&limit=`（展示 operator audit 列表）
+  - `GET /api/v1/stream`（SSE：展示连接状态与最近事件类型/时间戳；仅用于只读观测）
 
 ### 4.2 安全约束（当前）
 - Web 不包含写操作入口；不会调用控制面 API。

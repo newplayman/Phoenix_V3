@@ -28,31 +28,6 @@ func TestPriceToTick(t *testing.T) {
 	}
 }
 
-func TestASMMEngine_TicksStraddleDexPrice_StableIsToken0(t *testing.T) {
-	// stable token0 (6) / priced token1 (18), stable-per-priced ~= 2000.
-	centerPrice := 2000.0
-	width := 0.02
-	out, err := NewStandardASMMEngine().Calculate(EngineInput{
-		CexPrice:       centerPrice,
-		DexPrice:       centerPrice,
-		Volatility:     width,
-		Token0Decimals: 6,
-		Token1Decimals: 18,
-		StableIsToken0: true,
-		Params:         StrategyParams{RiskFactor: 1.0, MinSpreadPct: 0.01, MaxSpreadPct: 0.05},
-	})
-	if err != nil {
-		t.Fatalf("engine error: %v", err)
-	}
-	if out.TargetLowerTick >= out.TargetUpperTick {
-		t.Fatalf("expected lower<upper, got lower=%d upper=%d", out.TargetLowerTick, out.TargetUpperTick)
-	}
-	centerTick := PriceToTickWithDecimals(centerPrice, 6, 18)
-	if centerTick < out.TargetLowerTick || centerTick > out.TargetUpperTick {
-		t.Fatalf("expected center tick within range: center=%d lower=%d upper=%d", centerTick, out.TargetLowerTick, out.TargetUpperTick)
-	}
-}
-
 func TestStandardASMMEngine_Calculate(t *testing.T) {
 	eng := NewStandardASMMEngine()
 

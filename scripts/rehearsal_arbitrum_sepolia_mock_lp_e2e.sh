@@ -16,11 +16,6 @@ require jq
 [[ -n "${BOT_PRIVATE_KEY_FILE:-}" ]] || fail "missing BOT_PRIVATE_KEY_FILE"
 [[ "${MOCKLP_E2E_CONFIRM:-}" == "I_UNDERSTAND_GAS_COSTS" ]] || fail "missing MOCKLP_E2E_CONFIRM=I_UNDERSTAND_GAS_COSTS"
 
-if [[ -z "${ADMIN_TOKEN:-}" ]]; then
-  ADMIN_TOKEN="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
-  export ADMIN_TOKEN
-fi
-
 VENV="${PHOENIX_VENV:-/tmp/phoenix_venv}"
 PY="${VENV}/bin/python"
 PIP="${VENV}/bin/pip"
@@ -30,16 +25,19 @@ if [[ ! -x "$PY" ]]; then
   "$PIP" install -r scripts/requirements.txt >/dev/null
 fi
 
-echo "[mock-lp-e2e] deploying mock LP stack (testnet gas) ..."
-deploy_json="$(
-  MOCKLP_CONFIRM=I_UNDERSTAND_TESTNET_GAS \
-    "$PY" scripts/mock_lp_stack_setup.py deploy \
-    --rpc "$ARBITRUM_SEPOLIA_RPC_URL" \
-    --key-file "$BOT_PRIVATE_KEY_FILE"
-)"
-
-deploy_path="/tmp/phoenix_mock_lp_stack.json"
-echo "$deploy_json" >"$deploy_path"
+deploy_path="${MOCKLP_STACK_JSON:-/tmp/phoenix_mock_lp_stack.json}"
+if [[ "${MOCKLP_REUSE_EXISTING:-}" == "1" && -f "$deploy_path" ]]; then
+  echo "[mock-lp-e2e] reusing existing mock LP stack JSON: $deploy_path"
+else
+  echo "[mock-lp-e2e] deploying mock LP stack (testnet gas) ..."
+  deploy_json="$(
+    MOCKLP_CONFIRM=I_UNDERSTAND_TESTNET_GAS \
+      "$PY" scripts/mock_lp_stack_setup.py deploy \
+      --rpc "$ARBITRUM_SEPOLIA_RPC_URL" \
+      --key-file "$BOT_PRIVATE_KEY_FILE"
+  )"
+  echo "$deploy_json" >"$deploy_path"
+fi
 
 export POOL_ID
 POOL_ID="$(jq -r '.exports.POOL_ID' "$deploy_path")"
@@ -143,17 +141,41 @@ echo "[mock-lp-e2e] starting Phoenix (manual-only, live execute) ..."
 export PHOENIX_CONTROL_PLANE_ENABLED=1
 export CONFIG_PATH="$exec_cfg"
 
+if [[ -z "${ADMIN_TOKEN:-}" ]]; then
+  ADMIN_TOKEN="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
+  export ADMIN_TOKEN
+fi
+
 intent_id_file="/tmp/phoenix_mock_lp_intent_id.txt"
 rm -f "$intent_id_file"
-pid_file="/tmp/phoenix_mock_lp_bot.pid"
-rm -f "$pid_file"
 
-BOT_FLAGS="-config $exec_cfg -no-monitor -offline-feed -manual-only" \
+BOT_BIN="${BOT_BIN:-/tmp/phoenix_bot_mock_lp_e2e}"
+LOG_PATH="${LOG_PATH:-/tmp/phoenix_mock_lp_e2e.log}"
+export PHOENIX_DB_PATH="${PHOENIX_DB_PATH:-/tmp/phoenix_mock_lp_e2e.sqlite}"
+rm -f "$PHOENIX_DB_PATH"
+go build -o "$BOT_BIN" ./cmd/bot >/dev/null
+
+# Keep the bot running while we query intent details/tx hashes after acceptance.
+"$BOT_BIN" -config "$exec_cfg" -no-monitor -offline-feed -manual-only >"$LOG_PATH" 2>&1 &
+BOT_PID="$!"
+trap 'kill "$BOT_PID" >/dev/null 2>&1 || true' EXIT
+
+# Wait for API to listen (accept script requires port ready when SKIP_START_BOT=1).
+auth_header=(-H "Authorization: Bearer ${ADMIN_TOKEN}")
+for _ in {1..120}; do
+  code="$(curl -sS -o /dev/null -w '%{http_code}' "${auth_header[@]}" "http://127.0.0.1:8081/api/v1/health" 2>/dev/null || true)"
+  if [[ "$code" == "200" ]]; then
+    break
+  fi
+  sleep 0.2
+done
+
+SKIP_START_BOT=1 \
+  LOG_PATH="$LOG_PATH" \
+  BOT_FLAGS="-config $exec_cfg -no-monitor -offline-feed -manual-only" \
   POOL_ID="$POOL_ID" \
   CHAIN_ID=421614 \
   OUT_INTENT_ID_FILE="$intent_id_file" \
-  OUT_BOT_PID_FILE="$pid_file" \
-  KEEP_BOT_RUNNING=1 \
   scripts/accept_control_plane_v1.sh
 
 if [[ ! -f "$intent_id_file" ]]; then
@@ -163,40 +185,38 @@ intent_id="$(cat "$intent_id_file")"
 echo "[mock-lp-e2e] intent_id=$intent_id"
 
 auth_header=(-H "Authorization: Bearer ${ADMIN_TOKEN}")
-echo "[mock-lp-e2e] waiting for intent completion (mint step mined/failed) ..."
 intent_json=""
-for _ in {1..240}; do
+for _ in {1..120}; do
   intent_json="$(curl -sS "${auth_header[@]}" "http://127.0.0.1:8081/api/v1/intents/${intent_id}" || true)"
-  intent_status="$(jq -r '.intent.status // ""' <<<"$intent_json" 2>/dev/null || true)"
-  mint_status="$(jq -r '.steps[]? | select(.step_type == "mint") | .status' <<<"$intent_json" 2>/dev/null | head -n 1 || true)"
-  if [[ "$mint_status" == "mined" || "$mint_status" == "failed" ]]; then
-    break
-  fi
-  if [[ "$intent_status" == "succeeded" || "$intent_status" == "failed" || "$intent_status" == "simulated" ]]; then
+  mint_count="$(echo "$intent_json" | jq -r '[.steps[] | select(.step_type == "mint" and .tx_hash != null and .tx_hash != "")] | length' 2>/dev/null || echo 0)"
+  if [[ "${mint_count:-0}" != "0" ]]; then
     break
   fi
   sleep 1
 done
 
-intent_json_path="/tmp/phoenix_mock_lp_intent.json"
-echo "$intent_json" >"$intent_json_path"
+echo "$intent_json" | jq -r '.steps[] | "step=\(.step_type) status=\(.status) tx=\(.tx_hash // "")"' || true
 
-echo "[mock-lp-e2e] intent status:"
-jq -r '.intent | {intent_id, status, pool_id, chain_id}' "$intent_json_path" || true
-echo "[mock-lp-e2e] steps:"
-jq -r '.steps[]? | "step=" + .step_type + " status=" + .status + " tx=" + (.tx_hash // "")' "$intent_json_path" || true
+position_token_id="$(echo "$intent_json" | jq -r '.intent.metadata.position_token_id // ""' 2>/dev/null || true)"
+if [[ -n "${position_token_id}" && "${position_token_id}" != "null" ]]; then
+  echo "[mock-lp-e2e] position_token_id=${position_token_id}"
+fi
+
+tx_count="$(echo "$intent_json" | jq -r '[.steps[] | select(.tx_hash != null and .tx_hash != "")] | length')"
+if [[ "${tx_count:-0}" == "0" ]]; then
+  fail "no tx hashes found in intent steps; expected at least 1 broadcast tx (mint)"
+fi
+
+mint_count="$(echo "$intent_json" | jq -r '[.steps[] | select(.step_type == "mint" and .tx_hash != null and .tx_hash != "")] | length')"
+if [[ "${mint_count:-0}" == "0" ]]; then
+  fail "no mint step with tx hash found after wait; expected a mint tx for mock-lp e2e"
+fi
 
 echo "[mock-lp-e2e] verifying tx hashes (if present) ..."
-for h in $(jq -r '.steps[]? | select(.tx_hash != null and .tx_hash != "") | .tx_hash' "$intent_json_path"); do
-  TX_HASH="$h" ARBITRUM_SEPOLIA_RPC_URL="$ARBITRUM_SEPOLIA_RPC_URL" make -s tx-wait >/dev/null || true
-  TX_HASH="$h" ARBITRUM_SEPOLIA_RPC_URL="$ARBITRUM_SEPOLIA_RPC_URL" make -s tx-verify || true
+for h in $(echo "$intent_json" | jq -r '.steps[] | select(.tx_hash != null and .tx_hash != "") | .tx_hash'); do
+  TX_HASH="$h" ARBITRUM_SEPOLIA_RPC_URL="$ARBITRUM_SEPOLIA_RPC_URL" make -s tx-wait >/dev/null
+  TX_HASH="$h" ARBITRUM_SEPOLIA_RPC_URL="$ARBITRUM_SEPOLIA_RPC_URL" make -s tx-verify >/dev/null
+  echo "[mock-lp-e2e] verified $h"
 done
-
-if [[ -f "$pid_file" ]]; then
-  pid="$(cat "$pid_file" || true)"
-  if [[ -n "$pid" ]]; then
-    kill "$pid" >/dev/null 2>&1 || true
-  fi
-fi
 
 echo "[mock-lp-e2e] OK"

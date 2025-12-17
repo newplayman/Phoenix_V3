@@ -10,6 +10,7 @@ import (
 	"math"
 	"math/big"
 	"math/rand"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -284,6 +285,11 @@ func main() {
 	manualOnly := flag.Bool("manual-only", false, "Manual-only mode: disable automatic strategy evaluation loop (control-plane intents still execute)")
 	disableAPI := flag.Bool("no-api", false, "Disable API server (no ListenAndServe)")
 	disableMonitor := flag.Bool("no-monitor", false, "Disable monitor server (no ListenAndServe)")
+	dbDefault := strings.TrimSpace(os.Getenv("PHOENIX_DB_PATH"))
+	if dbDefault == "" {
+		dbDefault = "phoenix.db"
+	}
+	dbPath := flag.String("db-path", dbDefault, "path to sqlite db file (PHOENIX_DB_PATH)")
 	flag.Parse()
 
 	// 1. Load Configuration & watch for hot reload
@@ -484,7 +490,7 @@ func main() {
 	rebal := rebalancer.NewRebalancer()
 
 	// 7. Initialize Storage (Phase 5)
-	store, err := storage.NewStore("phoenix.db")
+	store, err := storage.NewStore(*dbPath)
 	if err != nil {
 		log.Fatalf("Failed to init db: %v", err)
 	}
