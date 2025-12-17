@@ -31,53 +31,7 @@ func UpsertIntentStatus(store *storage.Store, intent strategy.Intent, status str
 }
 
 func RecordStepSent(ctx context.Context, store *storage.Store, stream events.Stream, intentID string, stepIndex int, stepType string, txHash string, details map[string]interface{}) {
-	if store != nil {
-		b, _ := json.Marshal(details)
-		_ = store.CreateIntentStep(&storage.IntentStepRecord{
-			IntentID:  intentID,
-			StepType:  stepType,
-			StepIndex: stepIndex,
-			Status:    "sent",
-			TxHash:    txHash,
-			Details:   datatypes.JSON(b),
-		})
-	}
-	if stream != nil {
-		_ = stream.Publish(ctx, events.TopicIntentExec, map[string]interface{}{
-			"type":       "step_update",
-			"intent_id":  intentID,
-			"step_index": stepIndex,
-			"step_type":  stepType,
-			"status":     "sent",
-			"tx_hash":    txHash,
-			"details":    details,
-		})
-	}
-}
-
-func RecordStepPending(ctx context.Context, store *storage.Store, stream events.Stream, intentID string, stepIndex int, stepType string, details map[string]interface{}) {
-	if store != nil {
-		b, _ := json.Marshal(details)
-		_ = store.CreateIntentStep(&storage.IntentStepRecord{
-			IntentID:  intentID,
-			StepType:  stepType,
-			StepIndex: stepIndex,
-			Status:    "pending",
-			TxHash:    "",
-			Details:   datatypes.JSON(b),
-		})
-	}
-	if stream != nil {
-		_ = stream.Publish(ctx, events.TopicIntentExec, map[string]interface{}{
-			"type":       "step_update",
-			"intent_id":  intentID,
-			"step_index": stepIndex,
-			"step_type":  stepType,
-			"status":     "pending",
-			"tx_hash":    "",
-			"details":    details,
-		})
-	}
+	recordStepCreate(ctx, store, stream, intentID, stepIndex, stepType, "sent", txHash, details)
 }
 
 func RecordStepFinal(ctx context.Context, store *storage.Store, stream events.Stream, intentID string, stepIndex int, stepType string, status string, txHash string, details map[string]interface{}) {
@@ -99,13 +53,26 @@ func RecordStepFinal(ctx context.Context, store *storage.Store, stream events.St
 }
 
 func RecordStepSimulated(ctx context.Context, store *storage.Store, stream events.Stream, intentID string, stepIndex int, stepType string, txHash string, details map[string]interface{}) {
+	recordStepCreate(ctx, store, stream, intentID, stepIndex, stepType, "simulated", txHash, details)
+}
+
+func RecordStepSkipped(ctx context.Context, store *storage.Store, stream events.Stream, intentID string, stepIndex int, stepType string, details map[string]interface{}) {
+	recordStepCreate(ctx, store, stream, intentID, stepIndex, stepType, "skipped", "", details)
+}
+
+// RecordStepFailed records an immediate failure where no tx hash exists (e.g. preflight/validation errors).
+func RecordStepFailed(ctx context.Context, store *storage.Store, stream events.Stream, intentID string, stepIndex int, stepType string, txHash string, details map[string]interface{}) {
+	recordStepCreate(ctx, store, stream, intentID, stepIndex, stepType, "failed", txHash, details)
+}
+
+func recordStepCreate(ctx context.Context, store *storage.Store, stream events.Stream, intentID string, stepIndex int, stepType string, status string, txHash string, details map[string]interface{}) {
 	if store != nil {
 		b, _ := json.Marshal(details)
 		_ = store.CreateIntentStep(&storage.IntentStepRecord{
 			IntentID:  intentID,
 			StepType:  stepType,
 			StepIndex: stepIndex,
-			Status:    "simulated",
+			Status:    status,
 			TxHash:    txHash,
 			Details:   datatypes.JSON(b),
 		})
@@ -116,7 +83,7 @@ func RecordStepSimulated(ctx context.Context, store *storage.Store, stream event
 			"intent_id":  intentID,
 			"step_index": stepIndex,
 			"step_type":  stepType,
-			"status":     "simulated",
+			"status":     status,
 			"tx_hash":    txHash,
 			"details":    details,
 		})
