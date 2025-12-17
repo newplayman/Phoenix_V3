@@ -64,3 +64,12 @@ Actual broadcast (requires explicit unlock + confirmation; prompts for key):
   - from: 0x39BFa37b4A8A7A20D0F69fd0a388e3EAe739c217
   - tx_hash: 0x5a28452cf7b43e9d5c34f11065b026cd7d231445ad14d8f8b261a637bd1c046b
   - explorer: https://sepolia.arbiscan.io/tx/0x5a28452cf7b43e9d5c34f11065b026cd7d231445ad14d8f8b261a637bd1c046b
+
+## Mock-LP Plumbing Record (Optional)
+
+This is a testnet-only plumbing verification using mock contracts (not real UniV3 LP):
+
+- timestamp_utc: 2025-12-17T08:30:25Z
+  - from: 0x39BFa37b4A8A7A20D0F69fd0a388e3EAe739c217
+  - tx_hash: 0x84be128a9a79684c23182f0d9e29d8f0ee924edd7664c6e643af546175de9c22
+  - explorer: https://sepolia.arbiscan.io/tx/0x84be128a9a79684c23182f0d9e29d8f0ee924edd7664c6e643af546175de9c22

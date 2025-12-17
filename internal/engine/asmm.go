@@ -70,6 +70,11 @@ func (e *StandardASMMEngine) Calculate(input EngineInput) (*EngineOutput, error)
 	}
 	lowerTick := PriceToTickWithDecimals(priceForTicksLower, input.Token0Decimals, input.Token1Decimals)
 	upperTick := PriceToTickWithDecimals(priceForTicksUpper, input.Token0Decimals, input.Token1Decimals)
+	// Price-to-tick is not monotonic increasing in "stable-per-priced" space for all token orderings.
+	// Always sort to ensure lowerTick <= upperTick and the range is well-formed.
+	if lowerTick > upperTick {
+		lowerTick, upperTick = upperTick, lowerTick
+	}
 
 	// 5. Calculate Target Delta
 	// If CEX price > DEX price, we expect ARB to buy DEX, so price goes UP.

@@ -55,6 +55,31 @@ func RecordStepSent(ctx context.Context, store *storage.Store, stream events.Str
 	}
 }
 
+func RecordStepPending(ctx context.Context, store *storage.Store, stream events.Stream, intentID string, stepIndex int, stepType string, details map[string]interface{}) {
+	if store != nil {
+		b, _ := json.Marshal(details)
+		_ = store.CreateIntentStep(&storage.IntentStepRecord{
+			IntentID:  intentID,
+			StepType:  stepType,
+			StepIndex: stepIndex,
+			Status:    "pending",
+			TxHash:    "",
+			Details:   datatypes.JSON(b),
+		})
+	}
+	if stream != nil {
+		_ = stream.Publish(ctx, events.TopicIntentExec, map[string]interface{}{
+			"type":       "step_update",
+			"intent_id":  intentID,
+			"step_index": stepIndex,
+			"step_type":  stepType,
+			"status":     "pending",
+			"tx_hash":    "",
+			"details":    details,
+		})
+	}
+}
+
 func RecordStepFinal(ctx context.Context, store *storage.Store, stream events.Stream, intentID string, stepIndex int, stepType string, status string, txHash string, details map[string]interface{}) {
 	if store != nil {
 		b, _ := json.Marshal(details)

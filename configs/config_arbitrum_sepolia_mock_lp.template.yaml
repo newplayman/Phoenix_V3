@@ -1,0 +1,88 @@
+schema_version: "2024-07-01"
+strategy_version: "basic-v1"
+
+# Arbitrum Sepolia mock-LP template (testnet only).
+# This is for plumbing verification using:
+# - contracts/MockUniV3Pool.sol
+# - contracts/MockNonfungiblePositionManager.sol
+# - contracts/TestUSD.sol + contracts/TestWETH.sol
+#
+# Defaults remain SAFE: control plane disabled, kill-switch enabled, no broadcast.
+# Use env substitution via config loader (os.ExpandEnv).
+
+api:
+  enable_legacy: false
+  control_plane_enabled: false
+
+safety:
+  kill_switch: true
+  allow_tx_broadcast: false
+
+events:
+  driver: "memory"
+  file_path: "logs/events.jsonl"
+  replay_retention: "24h"
+  acks_required: false
+
+wallet:
+  # Keep most funds idle during rehearsals.
+  min_idle_pct: 0.80
+
+chains:
+  - id: 421614
+    name: "arbitrum-sepolia"
+    rpc: "${ARBITRUM_SEPOLIA_RPC_URL}"
+    quoter_address: ""
+    swap_helper_address: ""
+
+# NOTE: token0/token1 must follow Uniswap V3 ordering: token0 < token1 (address-sorted).
+pools:
+  - id: "${POOL_ID}"
+    chain_id: 421614
+    token0: "${TOKEN0_ADDRESS}"
+    token1: "${TOKEN1_ADDRESS}"
+    cex_price_token: "${CEX_PRICE_TOKEN_ADDRESS}"
+    token0_decimals: ${TOKEN0_DECIMALS}
+    token1_decimals: ${TOKEN1_DECIMALS}
+    fee: ${POOL_FEE}
+    address: "${POOL_ADDRESS}"
+    position_manager: "${POSITION_MANAGER_ADDRESS}"
+    position_token_id: ""
+    # Very small utilization for predictable tests (max 1% of equity).
+    max_investment: "0.0"
+    max_cap_pct: 0.01
+    max_daily_rebalances: 5
+    amount0: "0"
+    amount1: "0"
+    stable_tokens:
+      - "${STABLE_TOKEN_ADDRESS}"
+
+strategy:
+  name: "basic_rebalance"
+  dry_run: true
+  rebalance:
+    min_interval: "30s"
+  range:
+    min_width_pct: 0.01
+    max_width_pct: 0.05
+    vol_k: 0.05
+    vol_window: "10m"
+
+risk:
+  max_daily_gas: 0.02
+  max_drawdown: 0.10
+  consecutive_fails: 5
+  max_utilization_pct: 0.5
+  max_swap_slippage_pct: 0.01
+
+gateway:
+  gas_multiplier: 1.0
+  max_retries: 3
+  retry_backoff_ms: 1500
+  gas_bump_pct: 0.15
+  approval_multiplier: 1.05
+  preflight: true
+
+monitoring:
+  port: 8082
+

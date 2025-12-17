@@ -49,6 +49,9 @@ This repo is considered ready for **final pre-live verification** when all items
   - `ARBITRUM_SEPOLIA_RPC_URL=<your-rpc> make rehearsal-testnet-dryrun`
 - Optional live read-only rehearsal (requires a pool address with code on Arbitrum Sepolia):
   - `ARBITRUM_SEPOLIA_RPC_URL=<your-rpc> POOL_ADDRESS=<pool> make rehearsal-testnet-live-read`
+- Optional mock-LP plumbing e2e (deploys test contracts + broadcasts approve+mint under explicit confirm):
+  - See `docs/runbook/lp_e2e_testnet.md:1`
+  - `ARBITRUM_SEPOLIA_RPC_URL=<your-rpc> BOT_PRIVATE_KEY_FILE=<path> MOCKLP_E2E_CONFIRM=I_UNDERSTAND_GAS_COSTS make rehearsal-testnet-mock-lp`
 - Optional broadcast probe (gas-only, tx to self, requires explicit unlock):
   - See `docs/runbook/testnet.md:1` section "Broadcast probe" (or `make broadcast-probe`).
   - Sanity-check (no key required): `ARBITRUM_SEPOLIA_RPC_URL=<your-rpc> make broadcast-probe` should print `effective_dry_run=true` unless explicitly unlocked.

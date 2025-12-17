@@ -38,6 +38,7 @@ Validates control-plane v1 preview/execute + audit + DB writes **without** requi
 4. Provide a wallet identity for preview-time balance reads:
    - Preferred (no private key needed): `export BOT_WALLET_ADDRESS="0x..."`
    - Or: `export BOT_PRIVATE_KEY="0x<testnet_private_key>"`
+   - Or (recommended, local-only key file): `export BOT_PRIVATE_KEY_FILE="$HOME/.config/phoenix/bot_private_key.txt"`
 
 Run:
 

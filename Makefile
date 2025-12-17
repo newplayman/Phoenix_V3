@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test secret-scan boundary-scan mainnet-guard-scan repo-hygiene-scan web-ci web-build ci validate-arb-sepolia rehearsal-arb-sepolia rehearsal-offline rehearsal-testnet-dryrun rehearsal-testnet-live-read check-contracts broadcast-probe broadcast-probe-interactive broadcast-probe-record broadcast-probe-interactive-record wallet-addr native-balance tx-verify tx-wait signoff-record-probe prelive-signoff pr-split-help
+.PHONY: fmt fmt-check vet test secret-scan boundary-scan mainnet-guard-scan repo-hygiene-scan web-ci web-build ci validate-arb-sepolia rehearsal-arb-sepolia rehearsal-offline rehearsal-testnet-dryrun rehearsal-testnet-live-read rehearsal-testnet-mock-lp check-contracts broadcast-probe broadcast-probe-interactive broadcast-probe-record broadcast-probe-interactive-record wallet-addr native-balance tx-verify tx-wait signoff-record-probe prelive-signoff pr-split-help
 
 GO ?= go
 NPM ?= npm
@@ -52,6 +52,9 @@ rehearsal-testnet-dryrun:
 
 rehearsal-testnet-live-read:
 	./scripts/rehearsal_arbitrum_sepolia_live_readonly.sh
+
+rehearsal-testnet-mock-lp:
+	./scripts/rehearsal_arbitrum_sepolia_mock_lp_e2e.sh
 
 check-contracts:
 	./scripts/check_contract_code.sh $(ADDRS)

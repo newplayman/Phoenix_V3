@@ -10,7 +10,6 @@ import (
 	"math"
 	"math/big"
 	"math/rand"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -491,7 +490,10 @@ func main() {
 	}
 
 	// 8. Initialize Gateways (per chain)
-	privKey := os.Getenv("BOT_PRIVATE_KEY")
+	privKey, err := loadBotPrivateKey()
+	if err != nil {
+		log.Fatal(err)
+	}
 	if privKey == "" && !dryRun {
 		log.Fatal("BOT_PRIVATE_KEY not set")
 	}

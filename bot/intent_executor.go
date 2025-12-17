@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -516,19 +517,118 @@ func (e *IntentExecutor) executeIntent(ctx context.Context, intent strategy.Inte
 			})
 		}
 	} else {
+		mintStepIdx := -1
+		if tracked && intent.Type == strategy.IntentRebalance {
+			mintStepIdx = stepIndex
+			stepIndex++
+			RecordStepPending(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", map[string]interface{}{
+				"lower_tick": intent.Metadata["lower_tick"],
+				"upper_tick": intent.Metadata["upper_tick"],
+				"amount0":    intent.Metadata["amount0"],
+				"amount1":    intent.Metadata["amount1"],
+			})
+		}
+
+		// Build mint calldata for on-chain execution (and ensure ERC20 approvals) before sending.
+		if intent.Type == strategy.IntentRebalance {
+			ethGw, ok := gw.(*gateway.EthGateway)
+			if !ok || ethGw == nil {
+				status = "failed"
+				e.deps.Risk.RecordFailure()
+				if mintStepIdx >= 0 {
+					RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": "missing eth gateway"})
+				}
+				if tracked {
+					UpsertIntentStatus(stepStore, intent, "failed")
+				}
+				return
+			}
+			if localAdapter == nil {
+				status = "failed"
+				e.deps.Risk.RecordFailure()
+				if mintStepIdx >= 0 {
+					RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": "missing position manager adapter"})
+				}
+				if tracked {
+					UpsertIntentStatus(stepStore, intent, "failed")
+				}
+				return
+			}
+
+			intent.Metadata["recipient"] = ethGw.WalletAddress().Hex()
+			intent.Metadata["target"] = localAdapter.TargetAddress().Hex()
+
+			// Ensure allowance for both pool tokens (best-effort).
+			pmAddr := localAdapter.TargetAddress()
+			parseAmt := func(key string) *big.Int {
+				v := strings.TrimSpace(intent.Metadata[key])
+				if v == "" {
+					return big.NewInt(0)
+				}
+				if i, ok := new(big.Int).SetString(v, 10); ok && i.Sign() > 0 {
+					return i
+				}
+				return big.NewInt(0)
+			}
+			amt0 := parseAmt("amount0")
+			amt1 := parseAmt("amount1")
+			t0 := common.HexToAddress(intent.Metadata["token0"])
+			t1 := common.HexToAddress(intent.Metadata["token1"])
+			if amt0.Sign() > 0 {
+				if err := ethGw.EnsureAllowance(ctx, t0, pmAddr, amt0); err != nil {
+					status = "failed"
+					e.deps.Risk.RecordFailure()
+					if mintStepIdx >= 0 {
+						RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": "approve token0 failed", "detail": err.Error()})
+					}
+					if tracked {
+						UpsertIntentStatus(stepStore, intent, "failed")
+					}
+					return
+				}
+			}
+			if amt1.Sign() > 0 {
+				if err := ethGw.EnsureAllowance(ctx, t1, pmAddr, amt1); err != nil {
+					status = "failed"
+					e.deps.Risk.RecordFailure()
+					if mintStepIdx >= 0 {
+						RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": "approve token1 failed", "detail": err.Error()})
+					}
+					if tracked {
+						UpsertIntentStatus(stepStore, intent, "failed")
+					}
+					return
+				}
+			}
+
+			data, err := localAdapter.BuildMintData(intent)
+			if err != nil {
+				status = "failed"
+				e.deps.Risk.RecordFailure()
+				if mintStepIdx >= 0 {
+					RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": "build mint calldata failed", "detail": err.Error()})
+				}
+				if tracked {
+					UpsertIntentStatus(stepStore, intent, "failed")
+				}
+				return
+			}
+			intent.Metadata["calldata"] = "0x" + hex.EncodeToString(data)
+		}
+
 		result, err := gw.Send(ctx, intent)
 		if err != nil {
 			status = "failed"
 			e.deps.Risk.RecordFailure()
+			if mintStepIdx >= 0 {
+				RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": err.Error()})
+			}
 		} else {
 			txHash = result.Hash.Hex()
 			status = string(result.Status)
 			e.deps.Risk.RecordSuccess()
-			mintStepIdx := -1
-			if tracked && intent.Type == strategy.IntentRebalance {
-				mintStepIdx = stepIndex
-				stepIndex++
-				RecordStepSent(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", txHash, map[string]interface{}{
+			if mintStepIdx >= 0 {
+				RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "sent", txHash, map[string]interface{}{
 					"lower_tick": intent.Metadata["lower_tick"],
 					"upper_tick": intent.Metadata["upper_tick"],
 					"amount0":    intent.Metadata["amount0"],
@@ -539,7 +639,7 @@ func (e *IntentExecutor) executeIntent(ctx context.Context, intent strategy.Inte
 			if ethGw, ok := gw.(*gateway.EthGateway); ok && result.Status == gateway.StatusPending {
 				minedReceipt = e.deps.WaitForReceipt(ctx, ethGw, result.Hash)
 			}
-			if tracked && intent.Type == strategy.IntentRebalance && mintStepIdx >= 0 {
+			if mintStepIdx >= 0 {
 				if minedReceipt == nil || minedReceipt.Status != 1 {
 					RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", txHash, map[string]interface{}{"hash": txHash})
 				} else {

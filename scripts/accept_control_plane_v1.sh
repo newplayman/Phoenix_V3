@@ -62,17 +62,23 @@ if [[ -z "${ADMIN_TOKEN:-}" ]]; then
   export ADMIN_TOKEN
 fi
 
-if [[ -z "${BOT_PRIVATE_KEY:-}" && -z "${BOT_WALLET_ADDRESS:-}" ]]; then
-  echo "Either BOT_PRIVATE_KEY or BOT_WALLET_ADDRESS is required (preview needs balance reads)." >&2
+if [[ -z "${BOT_PRIVATE_KEY:-}" && -z "${BOT_PRIVATE_KEY_FILE:-}" && -z "${BOT_WALLET_ADDRESS:-}" ]]; then
+  echo "Either BOT_PRIVATE_KEY, BOT_PRIVATE_KEY_FILE, or BOT_WALLET_ADDRESS is required (preview needs balance reads)." >&2
   exit 2
 fi
 
 # SUPABASE_DB_URL is optional: if unset, the bot falls back to local SQLite.
 
 LOG_PATH="${LOG_PATH:-/tmp/phoenix_accept_control_plane_v1.log}"
+OUT_INTENT_ID_FILE="${OUT_INTENT_ID_FILE:-}"
+OUT_BOT_PID_FILE="${OUT_BOT_PID_FILE:-}"
+KEEP_BOT_RUNNING="${KEEP_BOT_RUNNING:-}"
 PID=""
 
 cleanup() {
+  if [[ -n "${KEEP_BOT_RUNNING}" ]]; then
+    return
+  fi
   if [[ -n "${PID}" ]]; then
     kill "${PID}" >/dev/null 2>&1 || true
     wait "${PID}" >/dev/null 2>&1 || true
@@ -99,6 +105,9 @@ if [[ -z "$SKIP_START_BOT" ]]; then
   # shellcheck disable=SC2086
   "$BOT_BIN" $BOT_FLAGS >"$LOG_PATH" 2>&1 &
   PID="$!"
+  if [[ -n "${OUT_BOT_PID_FILE}" ]]; then
+    echo "${PID}" >"${OUT_BOT_PID_FILE}"
+  fi
 else
   if ! port_in_use; then
     echo "SKIP_START_BOT=1 but port 8081 is not listening; start the bot first" >&2
@@ -194,6 +203,9 @@ intent1="$(jq -r '.intent_id' <<<"$exec_resp")"
 if [[ -z "$intent1" || "$intent1" == "null" ]]; then
   echo "[accept] missing intent_id from execute: $exec_resp" >&2
   exit 1
+fi
+if [[ -n "$OUT_INTENT_ID_FILE" ]]; then
+  echo "$intent1" >"$OUT_INTENT_ID_FILE"
 fi
 
 exec_resp2="$(curl -sS "${auth_header[@]}" -H "Content-Type: application/json" -d "$exec_payload" "$API_BASE/api/v1/operations/execute")"
