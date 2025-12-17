@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test secret-scan boundary-scan mainnet-guard-scan repo-hygiene-scan web-ci web-build ci validate-arb-sepolia rehearsal-arb-sepolia rehearsal-offline rehearsal-testnet-dryrun rehearsal-testnet-live-read rehearsal-testnet-mock-lp rehearsal-testnet-real-univ3-dryrun check-contracts broadcast-probe broadcast-probe-interactive broadcast-probe-record broadcast-probe-interactive-record wallet-addr native-balance tx-verify tx-wait signoff-record-probe prelive-signoff pr-split-help
+.PHONY: fmt fmt-check vet test py-check secret-scan boundary-scan mainnet-guard-scan repo-hygiene-scan web-ci web-build ci validate-arb-sepolia rehearsal-arb-sepolia rehearsal-offline rehearsal-testnet-dryrun rehearsal-testnet-live-read rehearsal-testnet-mock-lp rehearsal-testnet-real-univ3-dryrun rehearsal-testnet-real-univ3-mint rehearsal-testnet-fund-trl-usdt rehearsal-testnet-real-univ3-full-trl-usdt rehearsal-orderbook-120s check-contracts broadcast-probe broadcast-probe-interactive broadcast-probe-record broadcast-probe-interactive-record wallet-addr native-balance tx-verify tx-wait signoff-record-probe prelive-signoff pr-split-help
 
 GO ?= go
 NPM ?= npm
@@ -14,6 +14,9 @@ vet:
 
 test:
 	$(GO) test ./...
+
+py-check:
+	./scripts/python_syntax_check.sh
 
 secret-scan:
 	./scripts/secret_scan.sh
@@ -33,7 +36,7 @@ web-ci:
 web-build: web-ci
 	$(NPM) -C web run build
 
-ci: fmt-check vet test secret-scan mainnet-guard-scan repo-hygiene-scan boundary-scan web-build
+ci: fmt-check vet test py-check secret-scan mainnet-guard-scan repo-hygiene-scan boundary-scan web-build
 
 validate-arb-sepolia:
 	./scripts/validate_arbitrum_sepolia_template.sh
@@ -58,6 +61,18 @@ rehearsal-testnet-mock-lp:
 
 rehearsal-testnet-real-univ3-dryrun:
 	./scripts/rehearsal_arbitrum_sepolia_real_univ3_dryrun.sh
+
+rehearsal-testnet-real-univ3-mint:
+	bash ./scripts/rehearsal_arbitrum_sepolia_real_univ3_mint.sh
+
+rehearsal-testnet-fund-trl-usdt:
+	bash ./scripts/rehearsal_arbitrum_sepolia_real_univ3_fund_trl_usdt.sh
+
+rehearsal-testnet-real-univ3-full-trl-usdt:
+	bash ./scripts/rehearsal_arbitrum_sepolia_real_univ3_full_trl_usdt.sh
+
+rehearsal-orderbook-120s:
+	bash ./scripts/rehearsal_orderbook_120s.sh
 
 check-contracts:
 	./scripts/check_contract_code.sh $(ADDRS)

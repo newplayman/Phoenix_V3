@@ -45,6 +45,17 @@ Verify:
 - `make rehearsal-offline`
 - `ARBITRUM_SEPOLIA_RPC_URL=<your-rpc> make rehearsal-testnet-dryrun`
 
+## Market Data (Orderbook Raw + Replay, Optional)
+
+Stage:
+
+- `git add internal/feed/ cmd/orderbookrunner/ cmd/orderbookreplay/ scripts/rehearsal_orderbook_120s.sh docs/marketdata/ docs/runbook/orderbook_replay.md`
+
+Verify:
+
+- `go test ./internal/feed`
+- `make rehearsal-orderbook-120s`
+
 ## Phase 4 (Web Minimal)
 
 Stage:
@@ -80,6 +91,7 @@ This writes:
 - `/tmp/phoenix_pr_patches/phase0.patch`
 - `/tmp/phoenix_pr_patches/phase1.patch`
 - `/tmp/phoenix_pr_patches/phase2.patch`
+- `/tmp/phoenix_pr_patches/marketdata.patch` (optional)
 - `/tmp/phoenix_pr_patches/phase3.patch`
 - `/tmp/phoenix_pr_patches/phase4.patch`
 

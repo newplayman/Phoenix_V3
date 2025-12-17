@@ -53,6 +53,15 @@ Verify:
 - `go test ./internal/api -run TestDocsContract`
 - `make ci`
 
+## Optional — Market Data Replay (Orderbook Raw + Replay)
+
+Goal: store replayable orderbook raw logs and deterministically reconstruct top-of-book.
+
+Verify:
+
+- `make rehearsal-orderbook-120s`
+- `go test ./internal/feed`
+
 ## Phase 3 — Dry-Run & Testnet (Arbitrum Sepolia)
 
 Goal: safe-by-default execution with explicit unlock; testnet rehearsal is repeatable.

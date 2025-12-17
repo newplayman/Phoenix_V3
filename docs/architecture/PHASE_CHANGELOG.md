@@ -96,6 +96,35 @@ This document tracks **what changed per phase** (files + intent), so reviewers c
 - `go test ./internal/api -run TestDocsContract`
 - `make ci`
 
+## Market Data — Orderbook Raw + Replay (Step 2-2, Optional)
+
+**Key changes**
+
+- Added an orderbook raw log contract + replayable runner:
+  - raw log includes `ORDERBOOK_SNAPSHOT` + `ORDERBOOK_DELTA`
+  - replay reconstructs `best_bid/best_ask/spread`
+  - seq gap triggers REST snapshot resync
+
+**Key files**
+
+- `docs/marketdata/ORDERBOOK_RAW_SPEC.md`
+- `docs/runbook/orderbook_replay.md`
+- `internal/feed/orderbook.go`
+- `internal/feed/binance_orderbook.go`
+- `cmd/orderbookrunner/main.go`
+- `cmd/orderbookreplay/main.go`
+- `scripts/rehearsal_orderbook_120s.sh`
+
+**Risk / mitigation**
+
+- Risk: external market-data dependency (Binance) causes flakiness.
+  - Mitigation: the 120s runner is a manual rehearsal; correctness is covered by unit tests (snapshot/delta + seq gap resync).
+
+**How to test**
+
+- `make rehearsal-orderbook-120s`
+- `go test ./internal/feed`
+
 ## Phase 3 — Dry-Run & Testnet (Arbitrum Sepolia)
 
 **Key changes**
