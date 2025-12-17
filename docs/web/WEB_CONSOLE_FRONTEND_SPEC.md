@@ -7,6 +7,7 @@
 状态（必须明确）：
 - Feature status: `experimental`
 - 当前实现：`web/` 仅提供 **read-only 最小面板**（mock + `/api/v1` Read APIs 轮询），不包含写操作 UI。
+  - 已包含“执行追踪（只读）”：展示 intents 列表与 intent steps（tx hash 链接仅用于对照链上执行）。
 - 本文档：描述控制台的目标形态；任何后续新增/修改 API 必须以 `docs/api/*` 为契约源并补测试。
 
 ---
@@ -18,6 +19,12 @@
 3) 所有操作必须先 preview（展示步骤/风险/预估 gas）再 execute。
 4) 在 `experimental` 阶段，`web/` 不得调用任何 control-plane 端点（例如 `/api/v1/operations/*`、`/api/v1/pools/{pool_id}/pause|resume`）；仅允许 Read APIs。
    - 任何“写操作 UI/流程”只能在 `beta/stable` 阶段引入，并且必须满足：后端默认禁用 + 鉴权 + 审计 + kill-switch + 明确的人工确认。
+
+补充（当前实现允许的只读观测）：
+- intents：`GET /api/v1/intents`、`GET /api/v1/intents/{intent_id}`（展示 steps + tx_hash，用于对照链上执行）
+- tx：`GET /api/v1/tx`
+- audit：`GET /api/v1/audit`
+- SSE：`GET /api/v1/stream`（仅展示连接状态与最近事件；不触发写操作）
 
 ---
 
