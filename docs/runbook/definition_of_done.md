@@ -52,6 +52,9 @@ This repo is considered ready for **final pre-live verification** when all items
 - Optional mock-LP plumbing e2e (deploys test contracts + broadcasts approve+mint under explicit confirm):
   - See `docs/runbook/lp_e2e_testnet.md:1`
   - `ARBITRUM_SEPOLIA_RPC_URL=<your-rpc> BOT_PRIVATE_KEY_FILE=<path> MOCKLP_E2E_CONFIRM=I_UNDERSTAND_GAS_COSTS make rehearsal-testnet-mock-lp`
+- Optional real-UniV3 dry-run rehearsal (requires operator-supplied contract addresses; no broadcasts):
+  - See `docs/runbook/real_univ3_e2e_testnet.md:1`
+  - `ARBITRUM_SEPOLIA_RPC_URL=<your-rpc> BOT_WALLET_ADDRESS=0x... POOL_ID=... POOL_ADDRESS=... POSITION_MANAGER_ADDRESS=... TOKEN0_ADDRESS=... TOKEN1_ADDRESS=... TOKEN0_DECIMALS=... TOKEN1_DECIMALS=... POOL_FEE=... STABLE_TOKEN_ADDRESS=... CEX_PRICE_TOKEN_ADDRESS=... make rehearsal-testnet-real-univ3-dryrun`
 - Optional broadcast probe (gas-only, tx to self, requires explicit unlock):
   - See `docs/runbook/testnet.md:1` section "Broadcast probe" (or `make broadcast-probe`).
   - Sanity-check (no key required): `ARBITRUM_SEPOLIA_RPC_URL=<your-rpc> make broadcast-probe` should print `effective_dry_run=true` unless explicitly unlocked.
