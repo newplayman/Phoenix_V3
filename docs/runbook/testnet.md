@@ -54,8 +54,8 @@ Notes:
 - Offline acceptance mode (no real pool needed) can use a fake balance reader for preview planning:
   - `export PHOENIX_PREVIEW_FAKE_BALANCES=1`
   - Run bot with `-offline` (simulated pool state) so `/api/v1/pools/{pool_id}/state` becomes ready without on-chain calls.
-  - Note: fake balances are only enabled when both `-offline` and `effective_dry_run=true` are true.
-  - This is **for dry-run rehearsals only**; it must not be used for real executions.
+  - Note: fake balances are only enabled when `effective_dry_run=true` is true.
+  - This is **for dry-run rehearsals only**; it must not be used for real executions (it can mask funding issues).
 
 ## 2.2) Contract presence preflight (recommended)
 
@@ -172,3 +172,54 @@ On-chain transactions are not reversible. Phoenix implements “rollback” as *
 
 Operator guidance:
 - Treat any “execute” that could broadcast as “point of no return”; only proceed after preview, and only after explicit unlock of all safety gates.
+
+## 7) Real UniV3 Mint (optional, testnet only)
+
+This is the “full loop” verification that results in a real on-chain UniV3 position NFT mint (testnet gas only).
+
+Preconditions:
+- Wallet has Arbitrum Sepolia ETH for gas.
+- Wallet has the pool's `token0` + `token1` (or you can acquire via swap).
+- You have verified contract code is present on-chain (`scripts/check_contract_code.sh`).
+
+Funding helper (example pool TRL/USDT discovered on Arbitrum Sepolia; may change over time):
+
+```bash
+export ARBITRUM_SEPOLIA_RPC_URL='https://arbitrum-sepolia.infura.io/v3/...'
+export BOT_PRIVATE_KEY_FILE="$HOME/.config/phoenix/bot_private_key.txt"
+export BOT_WALLET_ADDRESS='0x...'
+
+FUND_TRL_USDT_CONFIRM=I_UNDERSTAND_TESTNET_GAS make rehearsal-testnet-fund-trl-usdt
+```
+
+Real mint:
+
+```bash
+export ARBITRUM_SEPOLIA_RPC_URL='https://arbitrum-sepolia.infura.io/v3/...'
+export BOT_PRIVATE_KEY_FILE="$HOME/.config/phoenix/bot_private_key.txt"
+export BOT_WALLET_ADDRESS='0x...'
+
+export POOL_ID='arbsepolia-real-univ3-trl-usdt'
+export POOL_ADDRESS='0x53448a5c2c61da7A797f25cEd6D11BE838E674Fb'
+export POSITION_MANAGER_ADDRESS='0x6b2937Bde17889EDCf8fbD8dE31C3C2a70Bc4d65'
+export TOKEN0_ADDRESS='0x1b46aA4C362788E3b2557CE465487d9E41742Fd9'  # TRL
+export TOKEN1_ADDRESS='0xF8BFc8301BfcC32862BdaC962a8C34c7ED13E51E'  # USDT
+export TOKEN0_DECIMALS=9
+export TOKEN1_DECIMALS=6
+export POOL_FEE=3000
+export CEX_PRICE_TOKEN_ADDRESS="$TOKEN0_ADDRESS"
+export STABLE_TOKEN_ADDRESS="$TOKEN1_ADDRESS"
+
+REAL_UNIV3_MINT_CONFIRM=I_UNDERSTAND_GAS_COSTS make rehearsal-testnet-real-univ3-mint
+```
+
+One-shot wrapper (fund + mint):
+
+```bash
+export ARBITRUM_SEPOLIA_RPC_URL='https://arbitrum-sepolia.infura.io/v3/...'
+export BOT_PRIVATE_KEY_FILE="$HOME/.config/phoenix/bot_private_key.txt"
+export BOT_WALLET_ADDRESS='0x...'
+
+FUND_TRL_USDT_CONFIRM=I_UNDERSTAND_TESTNET_GAS REAL_UNIV3_MINT_CONFIRM=I_UNDERSTAND_GAS_COSTS \
+  make rehearsal-testnet-real-univ3-full-trl-usdt
+```
