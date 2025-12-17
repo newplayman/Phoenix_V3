@@ -23,10 +23,23 @@ func NewRebalancer() *DefaultRebalancer {
 }
 
 func (r *DefaultRebalancer) Rebalance(ctx context.Context, input RebalanceInput) (*RebalancePlan, error) {
+	priceOf := func(token string) float64 {
+		if token == "" {
+			return 0
+		}
+		if p, ok := input.Prices[token]; ok {
+			return p
+		}
+		if p, ok := input.Prices[strings.ToLower(token)]; ok {
+			return p
+		}
+		return 0
+	}
+
 	// 1. Calculate Total Equity in USD
 	totalEquityUSD := 0.0
 	for token, bal := range input.WalletBalance {
-		price := input.Prices[token]
+		price := priceOf(token)
 		if price > 0 && bal.Sign() > 0 {
 			// Convert balance to float USD
 			// Need decimals. For now assuming we can look up decimals or standard map
@@ -95,8 +108,25 @@ func (r *DefaultRebalancer) Rebalance(ctx context.Context, input RebalanceInput)
 		return nil, fmt.Errorf("invalid ticks in intent")
 	}
 
-	p0 := input.Prices[input.PoolConfig.Token0]
-	p1 := input.Prices[input.PoolConfig.Token1]
+	p0 := priceOf(input.PoolConfig.Token0)
+	p1 := priceOf(input.PoolConfig.Token1)
+	if p0 == 0 {
+		// Allow stable addresses to be treated as $1 if caller forgot to include them in the price map.
+		for _, st := range input.PoolConfig.StableTokens {
+			if strings.EqualFold(st, input.PoolConfig.Token0) {
+				p0 = 1.0
+				break
+			}
+		}
+	}
+	if p1 == 0 {
+		for _, st := range input.PoolConfig.StableTokens {
+			if strings.EqualFold(st, input.PoolConfig.Token1) {
+				p1 = 1.0
+				break
+			}
+		}
+	}
 	if p1 == 0 {
 		p1 = 1.0
 	}
@@ -195,7 +225,7 @@ func (r *DefaultRebalancer) Rebalance(ctx context.Context, input RebalanceInput)
 			return
 		}
 
-		pt := input.Prices[to]
+		pt := priceOf(to)
 		if pt == 0 {
 			return
 		}
@@ -209,7 +239,7 @@ func (r *DefaultRebalancer) Rebalance(ctx context.Context, input RebalanceInput)
 			SlippagePct:  input.RiskLimits.MaxSwapSlippagePct,
 			FromDecimals: decimalsForToken(input.PoolConfig, from),
 			ToDecimals:   decimalsForToken(input.PoolConfig, to),
-			EstimatedUSD: estimateUSD(amount, input.Prices[from], decimalsForToken(input.PoolConfig, from)),
+			EstimatedUSD: estimateUSD(amount, priceOf(from), decimalsForToken(input.PoolConfig, from)),
 		}
 		if len(path) > 2 {
 			addrPath := make([]common.Address, 0, len(path))

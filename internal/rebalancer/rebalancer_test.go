@@ -3,6 +3,7 @@ package rebalancer
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 
 	"phoenix-v3/internal/strategy"
@@ -146,5 +147,58 @@ func TestRebalance_StableMultiHopPath(t *testing.T) {
 	}
 	if len(plan.Swaps[0].Path) != 3 {
 		t.Fatalf("expected 3-hop path, got %d", len(plan.Swaps[0].Path))
+	}
+}
+
+func TestRebalance_PriceLookupIsCaseInsensitive(t *testing.T) {
+	rebal := NewRebalancer()
+
+	// Use checksum-mixed token addresses (like configs), but provide prices/balances keyed by lower-case
+	// (like runtime collectors / adapters).
+	token0 := "0x48E7039c5693621Bd80CF181eB1a3874756e2003" // stable-ish
+	token1 := "0x4Bd38F347afb1c125dcc56B10A8ce024e71831d4" // priced token
+	t0 := strings.ToLower(token0)
+	t1 := strings.ToLower(token1)
+
+	intent := strategy.Intent{
+		ID:                "test-case-lookup",
+		TargetNotionalPct: 0.05,
+		Metadata: map[string]string{
+			"lower_tick": "100",
+			"upper_tick": "200",
+		},
+	}
+
+	bals := map[string]*big.Int{
+		t0: new(big.Int).Mul(big.NewInt(1000), big.NewInt(1e6)), // 1000 units (6 decimals)
+	}
+	prices := map[string]float64{
+		t0: 1.0,
+		t1: 2000.0,
+	}
+
+	input := RebalanceInput{
+		Intent:        intent,
+		WalletBalance: bals,
+		Prices:        prices,
+		PoolConfig: PoolConfig{
+			PoolID:         "pool-mock",
+			Token0:         token0,
+			Token1:         token1,
+			Token0Decimals: 6,
+			Token1Decimals: 18,
+			Fee:            3000,
+			MaxCapPct:      1.0,
+			StableTokens:   []string{t0},
+		},
+		RiskLimits: RiskLimits{
+			MinIdleCashPct:     0.1,
+			MaxSwapSlippagePct: 0.01,
+		},
+		State: PoolStateSnapshot{CurrentTick: 0},
+	}
+
+	if _, err := rebal.Rebalance(context.Background(), input); err != nil {
+		t.Fatalf("expected case-insensitive price lookup to succeed, got: %v", err)
 	}
 }
