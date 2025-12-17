@@ -24,13 +24,16 @@ import (
 )
 
 type ReceiptResult struct {
+	ChainID           int64
 	Hash              common.Hash
 	Status            TxStatus
+	StatusCode        uint64
 	GasUsed           uint64
 	EffectiveGasPrice *big.Int
 	Nonce             uint64
 	From              common.Address
 	To                common.Address
+	RevertReason      string
 }
 
 var erc20ABI abi.ABI
@@ -206,7 +209,6 @@ func (g *EthGateway) BalanceOfERC20(ctx context.Context, token common.Address) (
 	if !ok {
 		return nil, fmt.Errorf("unexpected balance type %T", values[0])
 	}
-	log.Printf("[Gateway Debug] BalanceOf %s = %s", token.Hex(), bal.String())
 	return bal, nil
 }
 
@@ -254,14 +256,13 @@ func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.
 		return fmt.Errorf("pack approve failed: %w", err)
 	}
 
-	g.nonceMu.Lock()
-	nonce := g.nonce
-	g.nonce++
-	g.nonceMu.Unlock()
-
 	approveCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
+	g.nonceMu.Lock()
+	defer g.nonceMu.Unlock()
+
+	nonce := g.nonce
 	var lastHash common.Hash
 	var lastErr error
 	for attempt := 0; attempt < g.maxRetries; attempt++ {
@@ -297,7 +298,9 @@ func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.
 				continue
 			}
 			if strings.Contains(msg, "nonce") {
-				_ = g.syncNonce()
+				if err := g.syncNonce(); err == nil {
+					nonce = g.nonce
+				}
 			}
 			backoff := time.Duration(g.retryBackoffMs*(attempt+1)) * time.Millisecond
 			select {
@@ -310,6 +313,9 @@ func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.
 
 		lastHash = signedTx.Hash()
 		log.Printf("[Gateway] Sent Approve Tx: %s", lastHash.Hex())
+		if nonce >= g.nonce {
+			g.nonce = nonce + 1
+		}
 
 		// Wait for approve to be mined before proceeding. Otherwise the next tx (e.g. UniV3 mint)
 		// can revert with "STF" due to allowance not yet updated.
@@ -374,13 +380,12 @@ func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResul
 		}
 	}
 
+	g.nonceMu.Lock()
+	defer g.nonceMu.Unlock()
+
+	nonce := g.nonce
 	var lastErr error
 	for attempt := 0; attempt < g.maxRetries; attempt++ {
-		// Ensure fresh nonce on retry after certain errors.
-		g.nonceMu.Lock()
-		nonce := g.nonce
-		g.nonce++
-		g.nonceMu.Unlock()
 
 		gasPrice, err := g.client.SuggestGasPrice(ctx)
 		if err != nil {
@@ -410,9 +415,15 @@ func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResul
 		if err := g.client.SendTransaction(ctx, signedTx); err != nil {
 			msg := err.Error()
 			lastErr = fmt.Errorf("send tx failed: %w", err)
-			// On nonce related errors, re-sync nonce and retry.
-			if strings.Contains(msg, "nonce") || strings.Contains(msg, "replacement transaction underpriced") {
-				_ = g.syncNonce()
+			// On nonce related errors, re-sync nonce and retry with the synced nonce.
+			if strings.Contains(msg, "nonce") {
+				if err := g.syncNonce(); err == nil {
+					nonce = g.nonce
+				}
+			}
+			// Replacement errors retry with the same nonce but higher gas.
+			if strings.Contains(msg, "replacement transaction underpriced") {
+				// keep nonce
 			}
 			backoff := time.Duration(g.retryBackoffMs*(attempt+1)) * time.Millisecond
 			log.Printf("[Gateway] Send attempt %d failed: %v (backoff %s)", attempt+1, err, backoff)
@@ -425,10 +436,14 @@ func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResul
 		}
 
 		log.Printf("[Gateway] Sent Intent %s Tx=%s Nonce=%d GasPrice=%s", intent.ID, signedTx.Hash().Hex(), nonce, adjPrice.String())
+		if nonce >= g.nonce {
+			g.nonce = nonce + 1
+		}
 		go g.waitReceipt(signedTx.Hash())
 		return &TxResult{Hash: signedTx.Hash(), Status: StatusPending}, nil
 	}
 
+	_ = g.syncNonce()
 	return nil, lastErr
 }
 
@@ -472,6 +487,10 @@ func (g *EthGateway) waitReceipt(hash common.Hash) {
 		} else {
 			txStatus = StatusReverted
 		}
+		revertReason := ""
+		if receipt.Status != 1 {
+			revertReason = g.tryFetchRevertReason(hash, receipt.BlockNumber)
+		}
 		gasPrice := receipt.EffectiveGasPrice
 		if gasPrice == nil {
 			if tx, _, err := g.client.TransactionByHash(ctx, hash); err == nil {
@@ -480,17 +499,53 @@ func (g *EthGateway) waitReceipt(hash common.Hash) {
 		}
 		select {
 		case g.receiptCh <- ReceiptResult{
+			ChainID:           g.chainID.Int64(),
 			Hash:              hash,
 			Status:            txStatus,
+			StatusCode:        receipt.Status,
 			GasUsed:           receipt.GasUsed,
 			EffectiveGasPrice: gasPrice,
 			Nonce:             nonce,
 			From:              fromAddr,
 			To:                toAddr,
+			RevertReason:      revertReason,
 		}:
 		default:
 			log.Printf("[Gateway] receipt channel full, drop %s", hash.Hex())
 		}
 		return
 	}
+}
+
+func (g *EthGateway) tryFetchRevertReason(hash common.Hash, blockNumber *big.Int) string {
+	if g == nil || g.client == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, _, err := g.client.TransactionByHash(ctx, hash)
+	if err != nil || tx == nil || tx.To() == nil {
+		return ""
+	}
+	msg := ethereum.CallMsg{
+		From:  g.wallet.Address,
+		To:    tx.To(),
+		Value: tx.Value(),
+		Data:  tx.Data(),
+	}
+	_, callErr := g.client.CallContract(ctx, msg, blockNumber)
+	if callErr == nil {
+		return ""
+	}
+	s := callErr.Error()
+	if i := strings.Index(s, "execution reverted:"); i >= 0 {
+		return strings.TrimSpace(strings.TrimPrefix(s[i:], "execution reverted:"))
+	}
+	if strings.Contains(s, "execution reverted") {
+		return "execution reverted"
+	}
+	if len(s) > 300 {
+		s = s[:300]
+	}
+	return s
 }

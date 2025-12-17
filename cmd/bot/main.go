@@ -19,8 +19,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 
+	"phoenix-v3/bot"
 	"phoenix-v3/internal/api"
 	"phoenix-v3/internal/chain/gateway"
 	"phoenix-v3/internal/chain/univ3"
@@ -37,31 +37,9 @@ import (
 	"phoenix-v3/internal/strategy"
 )
 
-type swapStats struct {
-	FromToken    string  `json:"from_token"`
-	ToToken      string  `json:"to_token"`
-	AmountIn     string  `json:"amount_in"`
-	QuotedOut    string  `json:"quoted_out"`
-	MinAmountOut string  `json:"min_amount_out"`
-	ActualOut    string  `json:"actual_out"`
-	SlippagePct  float64 `json:"slippage_pct"`
-	PnLUSD       float64 `json:"pnl_usd"`
-	TxHash       string  `json:"tx_hash"`
-}
-
 var abortFlag atomic.Bool
 var pauseFlag atomic.Bool
 var cleanupFlag atomic.Bool
-
-type poolRuntime struct {
-	cfg             config.PoolConfig
-	position        engine.CurrentPosition
-	positionTokenID string
-	dexPrice        float64
-	currentTick     int64
-	sqrtPrice       *big.Int
-	poolLiquidity   *big.Int
-}
 
 type pauseController struct{}
 
@@ -99,18 +77,18 @@ func (r *rebalanceController) TriggerRebalance(poolID string) error {
 	}
 
 	// Get current pool runtime to calculate ticks
-	runtimeState, hasRuntime := getPoolRuntimeSnapshot(poolID)
+	runtimeState, hasRuntime := bot.GetPoolRuntimeSnapshot(poolID)
 	if !hasRuntime || runtimeState == nil {
 		return fmt.Errorf("pool runtime not available for %s", poolID)
 	}
-	if runtimeState.dexPrice == 0 {
+	if runtimeState.DexPrice == 0 {
 		return fmt.Errorf("dex price not available for %s", poolID)
 	}
 
 	// Calculate ticks based on current DEX price with a reasonable spread
 	spreadPct := 0.05 // 5% spread
-	lowerPrice := runtimeState.dexPrice * (1 - spreadPct)
-	upperPrice := runtimeState.dexPrice * (1 + spreadPct)
+	lowerPrice := runtimeState.DexPrice * (1 - spreadPct)
+	upperPrice := runtimeState.DexPrice * (1 + spreadPct)
 
 	// IMPORTANT: PriceToTickWithDecimals expects price = Token1/Token0 (WETH/TUSD)
 	// But dexPrice is Token0/Token1 (TUSD/WETH), so we need to invert it
@@ -168,15 +146,6 @@ func (c *cleanupController) TriggerCleanup() error {
 	}()
 	return nil
 }
-
-var (
-	poolStateMu        sync.RWMutex
-	poolStates         = map[string]*poolRuntime{}
-	mintGuardMu        sync.RWMutex
-	poolMintGuards     = map[string]*atomic.Bool{}
-	poolWatcherMu      sync.Mutex
-	poolWatcherCancels = map[string]context.CancelFunc{}
-)
 
 type pricePoint struct {
 	t     time.Time
@@ -286,56 +255,18 @@ func (v *volatilityEstimator) SigmaDaily() float64 {
 	return sigmaSample * math.Sqrt(samplesPerDay)
 }
 
-type perPoolDailyLimiter struct {
-	mu     sync.Mutex
-	dayKey string
-	counts map[string]int
-}
-
-func (l *perPoolDailyLimiter) Allow(poolID string, limit int) bool {
-	if poolID == "" || limit <= 0 {
-		return true
-	}
-	today := time.Now().UTC().Format("2006-01-02")
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.counts == nil || l.dayKey != today {
-		l.dayKey = today
-		l.counts = map[string]int{}
-	}
-	if l.counts[poolID] >= limit {
-		return false
-	}
-	l.counts[poolID]++
-	return true
-}
-
-var rebalanceLimiter perPoolDailyLimiter
-
-var rebalanceAtMu sync.Mutex
-var lastRebalanceAt = map[string]time.Time{}
+var rebalanceLimiter bot.PerPoolDailyLimiter
+var lastRebalanceAt bot.LastActionTracker
 
 func setLastRebalanceAt(poolID string, t time.Time) {
-	if strings.TrimSpace(poolID) == "" {
-		return
-	}
-	if t.IsZero() {
-		t = time.Now()
-	}
-	rebalanceAtMu.Lock()
-	defer rebalanceAtMu.Unlock()
-	if lastRebalanceAt == nil {
-		lastRebalanceAt = map[string]time.Time{}
-	}
-	lastRebalanceAt[poolID] = t
+	lastRebalanceAt.Set(poolID, t)
 }
 
 func getLastRebalanceAt(poolID string) (time.Time, bool) {
-	rebalanceAtMu.Lock()
-	defer rebalanceAtMu.Unlock()
-	t, ok := lastRebalanceAt[poolID]
-	return t, ok
+	return lastRebalanceAt.Get(poolID)
 }
+
+func boolPtr(v bool) *bool { return &v }
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -351,6 +282,7 @@ func main() {
 	offlineFeedJumpProb := flag.Float64("offline-feed-jump-prob", 0.05, "Offline feed jump probability per tick (0..1)")
 	offlineFeedJumpMin := flag.Float64("offline-feed-jump-min", 0.003, "Offline feed jump min pct (e.g. 0.003 == 0.3%)")
 	offlineFeedJumpMax := flag.Float64("offline-feed-jump-max", 0.015, "Offline feed jump max pct (e.g. 0.015 == 1.5%)")
+	manualOnly := flag.Bool("manual-only", false, "Manual-only mode: disable automatic strategy evaluation loop (control-plane intents still execute)")
 	disableAPI := flag.Bool("no-api", false, "Disable API server (no ListenAndServe)")
 	disableMonitor := flag.Bool("no-monitor", false, "Disable monitor server (no ListenAndServe)")
 	flag.Parse()
@@ -364,13 +296,15 @@ func main() {
 
 	cfg := cfgManager.Current()
 	if *dryRunOverride {
-		cfg.Strategy.DryRun = true
+		cfg.Strategy.DryRun = boolPtr(true)
 		log.Println("[Bot] dry-run override enabled")
 	}
-	dryRun := cfg.Strategy.DryRun
+	safety := config.SafetyFromConfig(cfg)
+	dryRun := safety.EffectiveDryRun
 	log.Printf("Phoenix V3 Config Loaded. Chains: %d, Pools: %d", len(cfg.Chains), len(cfg.Pools))
-	syncPoolStatesFromConfig(cfg)
-	syncMintGuardsFromConfig(cfg)
+	log.Printf("[Safety] dry_run=%v kill_switch=%v allow_tx_broadcast=%v effective_dry_run=%v", safety.DryRun, safety.KillSwitch, safety.AllowTxBroadcast, safety.EffectiveDryRun)
+	bot.SyncPoolStatesFromConfig(cfg)
+	bot.SyncMintGuardsFromConfig(cfg)
 
 	var cfgValue atomic.Value
 	cfgValue.Store(cfg)
@@ -509,6 +443,7 @@ func main() {
 
 	// 4. Start DEX State (RPC)
 	chainStates := map[int64]*dexstate.UniV3State{}
+	poolWatchers := bot.NewPoolWatchers()
 	if *offlineMode {
 		log.Printf("[DEX] offline mode: simulate pool_state")
 		for _, pool := range cfg.Pools {
@@ -538,8 +473,8 @@ func main() {
 			}()
 		}
 	} else {
-		chainStates = initDexStates(cfg.Chains)
-		restartPoolWatchers(ctx, chainStates, cfg, eventStream)
+		chainStates = bot.InitDexStates(cfg.Chains)
+		poolWatchers.Restart(ctx, chainStates, cfg, eventStream)
 	}
 
 	// 6. Initialize Strategy & Queue
@@ -597,7 +532,7 @@ func main() {
 	}
 
 	// Periodically sync on-chain positions into pool runtimes (prevents duplicate LP creation).
-	go startPositionSync(ctx, &cfgValue, store, selectGateway)
+	go bot.StartPositionSync(ctx, &cfgValue, store, selectGateway)
 
 	if *cleanupMode {
 		if len(chainGateways) == 0 {
@@ -634,11 +569,69 @@ func main() {
 	} else {
 		log.Printf("[API] disabled")
 	}
+	apiServer.SetManualOnly(*manualOnly)
 	// Attach PnL store if supported
 	apiServer.AttachPnLStore(store)
 	apiServer.AttachPauseController(&pauseController{})
 	apiServer.AttachCleanupController(&cleanupController{ctx: ctx, gateways: chainGateways, cfgValue: &cfgValue, store: store})
 	apiServer.AttachRebalanceController(&rebalanceController{queue: intentQueue, cfgValue: &cfgValue})
+	cfgProvider := func() *config.AppConfig {
+		cfg, _ := cfgValue.Load().(*config.AppConfig)
+		return cfg
+	}
+	apiServer.AttachConfigProvider(cfgProvider)
+	apiServer.AttachEventStream(eventStream)
+	apiServer.AttachRebalancer(rebal)
+	apiServer.AttachBalanceProvider(api.NewDefaultBalanceProvider(selectGateway, cfgProvider, *offlineMode))
+	apiServer.AttachPoolStateProvider(func(poolID string) (api.PoolStateSnapshot, bool) {
+		rt, ok := bot.GetPoolRuntimeSnapshot(poolID)
+		if !ok || rt == nil {
+			return api.PoolStateSnapshot{}, false
+		}
+		liqStr := "0"
+		if rt.PoolLiquidity != nil {
+			liqStr = rt.PoolLiquidity.String()
+		}
+		sqrtStr := ""
+		if rt.SqrtPriceX96 != nil {
+			sqrtStr = rt.SqrtPriceX96.String()
+		}
+		priceToken := rt.Cfg.CEXPriceToken
+		if priceToken == "" {
+			priceToken = rt.Cfg.Token1
+		}
+		cex := lookupTokenPrice(&tokenPriceStore, priceToken)
+		if cex <= 0 {
+			cex = currentPrice
+		}
+		posLiq := ""
+		if rt.Position.Liquidity > 0 {
+			posLiq = fmt.Sprintf("%.0f", rt.Position.Liquidity)
+		}
+		return api.PoolStateSnapshot{
+			PoolID:          rt.Cfg.ID,
+			ChainID:         rt.Cfg.ChainID,
+			PoolAddress:     rt.Cfg.Address,
+			Token0:          rt.Cfg.Token0,
+			Token1:          rt.Cfg.Token1,
+			Token0Decimals:  rt.Cfg.Token0Decimals,
+			Token1Decimals:  rt.Cfg.Token1Decimals,
+			Fee:             rt.Cfg.Fee,
+			PositionTokenID: rt.PositionTokenID,
+			PosTickLower:    rt.Position.LowerTick,
+			PosTickUpper:    rt.Position.UpperTick,
+			PosLiquidity:    posLiq,
+			DexTick:         rt.CurrentTick,
+			DexPrice:        rt.DexPrice,
+			SqrtPriceX96:    sqrtStr,
+			PoolLiquidity:   liqStr,
+			CexPrice:        cex,
+			SigmaDaily:      rt.LastSigmaDaily,
+			WidthPct:        rt.LastWidthPct,
+			VolWindow:       rt.LastVolWindow,
+			Profile:         rt.LastProfile,
+		}, true
+	})
 
 	monitorService.SetStatusProvider(func() map[string]interface{} {
 		return map[string]interface{}{
@@ -696,7 +689,35 @@ func main() {
 		return lookupTokenPrice(&tokenPriceStore, token)
 	}
 
-	go startIntentExecutor(ctx, &cfgValue, intentQueue, riskMgr, guard, selectGateway, store, eventStream, adapter, router, swapHelperByChain, rebal, priceProvider, quoterByChain)
+	intentExecutor, err := bot.NewIntentExecutor(bot.IntentExecutorDeps{
+		ConfigValue:       &cfgValue,
+		Queue:             intentQueue,
+		Risk:              riskMgr,
+		Guard:             guard,
+		SelectGateway:     selectGateway,
+		Store:             store,
+		Stream:            eventStream,
+		Adapter:           adapter,
+		Router:            router,
+		SwapHelperByChain: swapHelperByChain,
+		Rebalancer:        rebal,
+		PriceProvider:     priceProvider,
+		QuoterByChain:     quoterByChain,
+
+		FindPoolConfig:        findPoolConfig,
+		EffectiveMaxCapPct:    effectiveMaxCapPct,
+		ExecuteSwap:           executeSwap,
+		WaitForReceipt:        waitForReceipt,
+		HasSufficientBalances: hasSufficientBalances,
+		ParseMetadataFloat:    parseMetadataFloat,
+		FloatFromBigInt:       floatFromBigInt,
+		SetLastRebalanceAt:    setLastRebalanceAt,
+		RebalanceLimiter:      &rebalanceLimiter,
+	})
+	if err != nil {
+		log.Fatalf("[IntentExecutor] init failed: %v", err)
+	}
+	intentExecutor.Start(ctx)
 	for _, gw := range chainGateways {
 		if gw == nil {
 			continue
@@ -732,16 +753,16 @@ func main() {
 				continue
 			}
 			if *dryRunOverride {
-				updated.Strategy.DryRun = true
+				updated.Strategy.DryRun = boolPtr(true)
 			}
 			cfgValue.Store(updated)
 			if w, err := time.ParseDuration(updated.Strategy.Range.VolWindow); err == nil {
 				volEstimator.SetWindow(w)
 			}
-			syncPoolStatesFromConfig(updated)
-			syncMintGuardsFromConfig(updated)
-			chainStates = initDexStates(updated.Chains)
-			restartPoolWatchers(ctx, chainStates, updated, eventStream)
+			bot.SyncPoolStatesFromConfig(updated)
+			bot.SyncMintGuardsFromConfig(updated)
+			chainStates = bot.InitDexStates(updated.Chains)
+			poolWatchers.Restart(ctx, chainStates, updated, eventStream)
 			riskMgr.UpdateLimits(updated.Risk.MaxDailyGas, updated.Risk.ConsecutiveFails, updated.Risk.MaxDrawdown)
 			// Also update swap limits
 			// riskMgr.UpdateSwapLimits(updated.Risk.MaxSwapVol, updated.Risk.MaxSwapCount) // If added to config generic
@@ -783,48 +804,28 @@ func main() {
 			if !ok {
 				continue
 			}
-			poolStateMu.Lock()
-			if runtime, exists := poolStates[state.PoolID]; exists {
-				liqStr := strings.TrimSpace(state.Liquidity)
-				if liqStr != "" {
-					if liqBI, ok := new(big.Int).SetString(liqStr, 10); ok {
-						runtime.poolLiquidity = liqBI
-					}
-				}
-				liq, _ := strconv.ParseFloat(state.Liquidity, 64)
-				priceToken := runtime.cfg.CEXPriceToken
-				if priceToken == "" {
-					priceToken = runtime.cfg.Token1
-				}
-				// If the CEX-priced token is token1, then the stable side is token0; otherwise stable side is token1.
-				stableIsToken0 := strings.EqualFold(priceToken, runtime.cfg.Token1)
-				runtime.dexPrice = tickToDexPrice(state.CurrentTick, runtime.cfg.Token0Decimals, runtime.cfg.Token1Decimals, stableIsToken0)
-				runtime.currentTick = state.CurrentTick
-				_ = liq // liquidity is still logged below; position is synced separately from chain.
-				if state.SqrtPriceX96 != "" {
-					if sqrt, ok := new(big.Int).SetString(state.SqrtPriceX96, 10); ok {
-						runtime.sqrtPrice = sqrt
-					}
-				}
-				log.Printf("[DEX] Pool %s tick=%d liquidity=%s dexPrice=%.2f", state.PoolID, state.CurrentTick, state.Liquidity, runtime.dexPrice)
+			if dexPrice, ok := bot.UpdatePoolStateFromEvent(state.PoolID, state.CurrentTick, state.Liquidity, state.SqrtPriceX96); ok {
+				log.Printf("[DEX] Pool %s tick=%d liquidity=%s dexPrice=%.2f", state.PoolID, state.CurrentTick, state.Liquidity, dexPrice)
 			} else {
 				log.Printf("[DEX] Received state for unknown pool %s", state.PoolID)
 			}
-			poolStateMu.Unlock()
 
 		case <-queryTicker.C:
+			if *manualOnly {
+				continue
+			}
 			if pauseFlag.Load() {
 				log.Printf("[Control] paused, skipping strategy evaluation")
 				continue
 			}
-			for _, runtime := range snapshotPoolRuntimes() {
-				if guard := getMintGuard(runtime.cfg.ID); guard.Load() {
-					log.Printf("[PositionGuard] Mint in progress for pool %s, skipping strategy evaluation", runtime.cfg.ID)
+			for _, runtime := range bot.SnapshotPoolRuntimes() {
+				if guard := bot.GetMintGuard(runtime.Cfg.ID); guard.Load() {
+					log.Printf("[PositionGuard] Mint in progress for pool %s, skipping strategy evaluation", runtime.Cfg.ID)
 					continue
 				}
 
-				if runtime.dexPrice == 0 {
-					log.Printf("[Strategy] Pool %s pending dex price, skip", runtime.cfg.ID)
+				if runtime.DexPrice == 0 {
+					log.Printf("[Strategy] Pool %s pending dex price, skip", runtime.Cfg.ID)
 					continue
 				}
 
@@ -833,11 +834,11 @@ func main() {
 					minIntervalStr := strings.TrimSpace(currentCfg.Strategy.Rebalance.MinInterval)
 					if minIntervalStr != "" {
 						if minInterval, err := time.ParseDuration(minIntervalStr); err == nil && minInterval > 0 {
-							if lastAt, ok := getLastRebalanceAt(runtime.cfg.ID); ok && time.Since(lastAt) < minInterval {
-								if last, ok := lastCooldownLog[runtime.cfg.ID]; !ok || time.Since(last) >= 30*time.Second {
-									lastCooldownLog[runtime.cfg.ID] = time.Now()
+							if lastAt, ok := getLastRebalanceAt(runtime.Cfg.ID); ok && time.Since(lastAt) < minInterval {
+								if last, ok := lastCooldownLog[runtime.Cfg.ID]; !ok || time.Since(last) >= 30*time.Second {
+									lastCooldownLog[runtime.Cfg.ID] = time.Now()
 									log.Printf("[Strategy] pool=%s cooldown active (last_rebalance=%s min_interval=%s), skip",
-										runtime.cfg.ID,
+										runtime.Cfg.ID,
 										lastAt.Format(time.RFC3339),
 										minIntervalStr,
 									)
@@ -851,53 +852,66 @@ func main() {
 				policyEngine := strategy.NewPolicyEngine(currentCfg.Strategy.Profiles)
 				profile := policyEngine.Profile(mode)
 
-				baseCfg := buildStrategyConfig(currentCfg, runtime.cfg)
+				baseCfg := buildStrategyConfig(currentCfg, runtime.Cfg)
 				tunedCfg := policyEngine.Apply(mode, baseCfg)
 
 				strategyMu.RLock()
-				strat := strategyMap[runtime.cfg.ID]
+				strat := strategyMap[runtime.Cfg.ID]
 				strategyMu.RUnlock()
 				if strat == nil {
 					continue
 				}
 				strat.UpdateConfig(tunedCfg)
 
-				widthPct, minWidthPct, maxWidthPct := computeTargetWidthPct(currentCfg, runtime.cfg, profile, volEstimator.SigmaDaily())
-				priceToken := runtime.cfg.CEXPriceToken
+				widthPct, minWidthPct, maxWidthPct := computeTargetWidthPct(currentCfg, runtime.Cfg, profile, volEstimator.SigmaDaily())
+				priceToken := runtime.Cfg.CEXPriceToken
 				if priceToken == "" {
-					priceToken = runtime.cfg.Token1
+					priceToken = runtime.Cfg.Token1
 				}
-				stableIsToken0 := strings.EqualFold(priceToken, runtime.cfg.Token1)
+				stableIsToken0 := strings.EqualFold(priceToken, runtime.Cfg.Token1)
 
 				input := engine.EngineInput{
 					CexPrice:       currentPrice,
-					DexPrice:       runtime.dexPrice,
+					DexPrice:       runtime.DexPrice,
 					Volatility:     widthPct,
-					Position:       runtime.position,
-					Token0Decimals: runtime.cfg.Token0Decimals,
-					Token1Decimals: runtime.cfg.Token1Decimals,
+					Position:       runtime.Position,
+					Token0Decimals: runtime.Cfg.Token0Decimals,
+					Token1Decimals: runtime.Cfg.Token1Decimals,
 					StableIsToken0: stableIsToken0,
 					Params:         engine.StrategyParams{RiskFactor: tunedCfg.EngineRiskFactor, MinSpreadPct: minWidthPct, MaxSpreadPct: maxWidthPct},
 				}
 
+				bot.SetPoolStrategySnapshot(runtime.Cfg.ID, volEstimator.SigmaDaily(), widthPct, currentCfg.Strategy.Range.VolWindow, mode, currentPrice)
+				_ = eventStream.Publish(ctx, events.TopicStrategy, map[string]interface{}{
+					"pool_id":     runtime.Cfg.ID,
+					"chain_id":    runtime.Cfg.ChainID,
+					"profile":     mode,
+					"sigma_daily": volEstimator.SigmaDaily(),
+					"width_pct":   widthPct,
+					"vol_window":  currentCfg.Strategy.Range.VolWindow,
+					"dex_price":   runtime.DexPrice,
+					"cex_price":   currentPrice,
+					"tick":        runtime.CurrentTick,
+				})
+
 				// Periodic visibility for testnet stress runs (even when no intents are produced).
-				if last, ok := lastStrategyLog[runtime.cfg.ID]; !ok || time.Since(last) >= 30*time.Second {
-					lastStrategyLog[runtime.cfg.ID] = time.Now()
+				if last, ok := lastStrategyLog[runtime.Cfg.ID]; !ok || time.Since(last) >= 30*time.Second {
+					lastStrategyLog[runtime.Cfg.ID] = time.Now()
 					log.Printf("[Strategy] pool=%s sigma_daily=%.4f width_pct=%.4f pos=[%d,%d] tick=%d dexPrice=%.2f cex=%.2f",
-						runtime.cfg.ID,
+						runtime.Cfg.ID,
 						volEstimator.SigmaDaily(),
 						widthPct,
-						runtime.position.LowerTick,
-						runtime.position.UpperTick,
-						runtime.currentTick,
-						runtime.dexPrice,
+						runtime.Position.LowerTick,
+						runtime.Position.UpperTick,
+						runtime.CurrentTick,
+						runtime.DexPrice,
 						currentPrice,
 					)
 				}
 
 				intents, err := strat.Evaluate(context.Background(), input)
 				if err != nil {
-					log.Printf("Strategy Error (pool %s): %v", runtime.cfg.ID, err)
+					log.Printf("Strategy Error (pool %s): %v", runtime.Cfg.ID, err)
 					continue
 				}
 
@@ -1081,79 +1095,6 @@ func decodePoolState(payload interface{}) (eventsPoolState, bool) {
 	return eventsPoolState{}, false
 }
 
-func tickToDexPrice(tick int64, token0Decimals, token1Decimals int, stableIsToken0 bool) float64 {
-	// Uniswap V3 tick encodes the raw price:
-	//   rawPrice = 1.0001^tick = (token1Raw / token0Raw)
-	//
-	// Phoenix Phase-1 expects a human-readable "stable per priced-token" value comparable
-	// to the CEX feed (e.g. USD per ETH). Because token0/token1 ordering is address-sorted,
-	// the stable side can be either token0 or token1 (configured via stable_tokens + cex_price_token).
-	rawPrice := math.Pow(1.0001, float64(tick))
-	if rawPrice <= 0 {
-		return 0
-	}
-	if stableIsToken0 {
-		// stable(token0) per priced(token1)
-		return (1.0 / rawPrice) * math.Pow10(token1Decimals-token0Decimals)
-	}
-	// stable(token1) per priced(token0)
-	return rawPrice * math.Pow10(token0Decimals-token1Decimals)
-}
-
-func restartPoolWatchers(ctx context.Context, stateMap map[int64]*dexstate.UniV3State, cfg *config.AppConfig, stream events.Stream) {
-	poolWatcherMu.Lock()
-	for id, cancel := range poolWatcherCancels {
-		log.Printf("[DEX] stopping watcher for pool %s", id)
-		cancel()
-	}
-	poolWatcherCancels = make(map[string]context.CancelFunc)
-	poolWatcherMu.Unlock()
-
-	if cfg == nil {
-		return
-	}
-
-	for _, pool := range cfg.Pools {
-		client := stateMap[pool.ChainID]
-		if client == nil || pool.Address == "" {
-			log.Printf("[DEX] missing rpc or address for pool %s", pool.ID)
-			continue
-		}
-		addr := common.HexToAddress(pool.Address)
-		watchCtx, cancel := context.WithCancel(ctx)
-		poolID := pool.ID
-		go func(chainID int64, c *dexstate.UniV3State, watchAddr common.Address, pid string, localCtx context.Context) {
-			ticker := time.NewTicker(15 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-localCtx.Done():
-					return
-				case <-ticker.C:
-					state, err := c.GetPoolState(chainID, watchAddr)
-					if err != nil {
-						log.Printf("[DEX] fetch pool state failed (%s): %v", pid, err)
-						continue
-					}
-					payload := eventsPoolState{
-						PoolID:       pid,
-						ChainID:      state.ChainID,
-						PoolAddress:  state.PoolAddress.Hex(),
-						CurrentTick:  state.CurrentTick,
-						Liquidity:    state.Liquidity.String(),
-						SqrtPriceX96: state.SqrtPriceX96.String(),
-					}
-					_ = stream.Publish(localCtx, events.TopicPoolState, payload)
-				}
-			}
-		}(pool.ChainID, client, addr, poolID, watchCtx)
-
-		poolWatcherMu.Lock()
-		poolWatcherCancels[poolID] = cancel
-		poolWatcherMu.Unlock()
-	}
-}
-
 type uniV3PositionSnapshot struct {
 	TokenID   *big.Int
 	Liquidity *big.Int
@@ -1222,278 +1163,6 @@ func asUint32(v interface{}) (uint32, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func parseMintedPositionTokenID(rcpt *types.Receipt, positionManager common.Address, recipient common.Address) *big.Int {
-	if rcpt == nil {
-		return nil
-	}
-	transferSig := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
-	for _, lg := range rcpt.Logs {
-		if lg == nil {
-			continue
-		}
-		if lg.Address != positionManager {
-			continue
-		}
-		if len(lg.Topics) < 4 {
-			continue
-		}
-		if lg.Topics[0] != transferSig {
-			continue
-		}
-		fromAddr := common.BytesToAddress(lg.Topics[1].Bytes()[12:])
-		toAddr := common.BytesToAddress(lg.Topics[2].Bytes()[12:])
-		if fromAddr != (common.Address{}) {
-			continue
-		}
-		if toAddr != recipient {
-			continue
-		}
-		return new(big.Int).SetBytes(lg.Topics[3].Bytes())
-	}
-	return nil
-}
-
-func fetchPositionByTokenID(ctx context.Context, ethGw *gateway.EthGateway, adapter *univ3.Adapter, pmAddr common.Address, tokenID *big.Int) (int64, int64, *big.Int, bool, error) {
-	if ethGw == nil || adapter == nil || tokenID == nil || tokenID.Sign() <= 0 {
-		return 0, 0, nil, false, fmt.Errorf("invalid inputs")
-	}
-	dataPos, err := adapter.ParsedABI.Pack("positions", tokenID)
-	if err != nil {
-		return 0, 0, nil, false, err
-	}
-	resPos, err := ethGw.Call(ctx, pmAddr, dataPos)
-	if err != nil {
-		return 0, 0, nil, false, err
-	}
-	upPos, err := adapter.ParsedABI.Unpack("positions", resPos)
-	if err != nil || len(upPos) < 8 {
-		if err == nil {
-			err = fmt.Errorf("unexpected positions unpack len=%d", len(upPos))
-		}
-		return 0, 0, nil, false, err
-	}
-	tL, okTL := asInt64(upPos[5])
-	tU, okTU := asInt64(upPos[6])
-	liq, okLiq := asBigInt(upPos[7])
-	if !okTL || !okTU || !okLiq {
-		return 0, 0, nil, false, fmt.Errorf("unexpected positions types")
-	}
-	return tL, tU, liq, true, nil
-}
-
-func setPoolRuntimePosition(poolID string, tokenID string, pos engine.CurrentPosition) {
-	poolStateMu.Lock()
-	defer poolStateMu.Unlock()
-	if rt, ok := poolStates[poolID]; ok && rt != nil {
-		rt.position = pos
-		rt.positionTokenID = strings.TrimSpace(tokenID)
-	}
-}
-
-func clearPoolRuntimePosition(poolID string) {
-	setPoolRuntimePosition(poolID, "", engine.CurrentPosition{})
-}
-
-func closePositionTokenID(ctx context.Context, ethGw *gateway.EthGateway, adapter *univ3.Adapter, pmAddr common.Address, tokenID *big.Int) error {
-	if ethGw == nil || adapter == nil || tokenID == nil || tokenID.Sign() <= 0 {
-		return nil
-	}
-	tL, tU, liq, ok, posErr := fetchPositionByTokenID(ctx, ethGw, adapter, pmAddr, tokenID)
-	if !ok {
-		// If the tokenId no longer exists (already burned / transferred), "positions" may revert.
-		// Treat this as already-closed so the bot can recover by clearing its stored tokenId.
-		if posErr != nil {
-			msg := posErr.Error()
-			if strings.Contains(msg, "execution reverted") || strings.Contains(msg, "not found") {
-				log.Printf("[Rebalance] position tokenId=%s not found (already closed?): %v", tokenID.String(), posErr)
-				return nil
-			}
-			return fmt.Errorf("failed to fetch position tokenId=%s: %w", tokenID.String(), posErr)
-		}
-		return fmt.Errorf("failed to fetch position tokenId=%s", tokenID.String())
-	}
-
-	// 1) DecreaseLiquidity (if needed)
-	if liq != nil && liq.Sign() > 0 {
-		intent := strategy.Intent{
-			ID:      fmt.Sprintf("WITHDRAW_%s", tokenID.String()),
-			Type:    strategy.IntentWithdraw,
-			PoolID:  "",
-			ChainID: ethGw.ChainID().Int64(),
-			Metadata: map[string]string{
-				"token_id":  tokenID.String(),
-				"liquidity": liq.String(),
-				"target":    pmAddr.Hex(),
-				"value":     "0",
-			},
-		}
-		data, err := adapter.BuildDecreaseLiquidityData(intent)
-		if err != nil {
-			return fmt.Errorf("build decreaseLiquidity: %w", err)
-		}
-		intent.Metadata["calldata"] = hex.EncodeToString(data)
-		res, err := ethGw.Send(ctx, intent)
-		if err != nil {
-			return fmt.Errorf("send decreaseLiquidity: %w", err)
-		}
-		_ = waitForReceipt(ctx, ethGw, res.Hash)
-	}
-
-	// 2) Collect (always attempt)
-	collectIntent := strategy.Intent{
-		ID:      fmt.Sprintf("COLLECT_%s", tokenID.String()),
-		Type:    strategy.IntentCollectFee,
-		PoolID:  "",
-		ChainID: ethGw.ChainID().Int64(),
-		Metadata: map[string]string{
-			"token_id":  tokenID.String(),
-			"recipient": ethGw.Address(),
-			"target":    pmAddr.Hex(),
-			"value":     "0",
-		},
-	}
-	collectData, err := adapter.BuildCollectData(collectIntent)
-	if err != nil {
-		return fmt.Errorf("build collect: %w", err)
-	}
-	collectIntent.Metadata["calldata"] = hex.EncodeToString(collectData)
-	res2, err := ethGw.Send(ctx, collectIntent)
-	if err != nil {
-		return fmt.Errorf("send collect: %w", err)
-	}
-	_ = waitForReceipt(ctx, ethGw, res2.Hash)
-
-	// 3) Burn NFT (safe even if already at 0 liquidity)
-	burnIntent := strategy.Intent{
-		ID:      fmt.Sprintf("BURN_%s", tokenID.String()),
-		Type:    strategy.IntentWithdraw,
-		PoolID:  "",
-		ChainID: ethGw.ChainID().Int64(),
-		Metadata: map[string]string{
-			"token_id": tokenID.String(),
-			"target":   pmAddr.Hex(),
-			"value":    "0",
-		},
-	}
-	burnData, err := adapter.BuildBurnNFTData(burnIntent)
-	if err != nil {
-		return fmt.Errorf("build burn: %w", err)
-	}
-	burnIntent.Metadata["calldata"] = hex.EncodeToString(burnData)
-	res3, err := ethGw.Send(ctx, burnIntent)
-	if err != nil {
-		return fmt.Errorf("send burn: %w", err)
-	}
-	_ = waitForReceipt(ctx, ethGw, res3.Hash)
-
-	// Best-effort: clear local runtime position after close.
-	_ = tL
-	_ = tU
-	return nil
-}
-
-// drainPositionTokenID reduces most liquidity and collects, but keeps a small residual liquidity.
-// This is useful when the pool has no other liquidity and we still want to execute swaps
-// against the pool before fully burning the position.
-func drainPositionTokenID(ctx context.Context, ethGw *gateway.EthGateway, adapter *univ3.Adapter, pmAddr common.Address, tokenID *big.Int, keepPct float64) (bool, error) {
-	if ethGw == nil || adapter == nil || tokenID == nil || tokenID.Sign() <= 0 {
-		return false, nil
-	}
-	if keepPct <= 0 {
-		return false, nil
-	}
-	if keepPct >= 1 {
-		return true, nil
-	}
-
-	_, _, liq, ok, posErr := fetchPositionByTokenID(ctx, ethGw, adapter, pmAddr, tokenID)
-	if !ok {
-		if posErr != nil {
-			msg := posErr.Error()
-			if strings.Contains(msg, "execution reverted") || strings.Contains(msg, "not found") {
-				log.Printf("[Rebalance] position tokenId=%s not found (already closed?): %v", tokenID.String(), posErr)
-				return false, nil
-			}
-			return false, fmt.Errorf("fetch position tokenId=%s: %w", tokenID.String(), posErr)
-		}
-		return false, fmt.Errorf("fetch position tokenId=%s failed", tokenID.String())
-	}
-	if liq == nil || liq.Sign() <= 0 {
-		return false, nil
-	}
-
-	keep := new(big.Int)
-	// floor(liq * keepPct)
-	fKeep := new(big.Float).Mul(new(big.Float).SetInt(liq), big.NewFloat(keepPct))
-	fKeep.Int(keep)
-	if keep.Sign() < 0 {
-		keep.SetInt64(0)
-	}
-	// Ensure we withdraw at least 1 unit if possible.
-	if keep.Cmp(liq) >= 0 {
-		keep.Sub(liq, big.NewInt(1))
-	}
-	if keep.Sign() < 0 {
-		keep.SetInt64(0)
-	}
-	withdraw := new(big.Int).Sub(liq, keep)
-	if withdraw.Sign() <= 0 {
-		// Keep everything.
-		return true, nil
-	}
-
-	log.Printf("[Rebalance] draining position tokenId=%s keepPct=%.3f withdrawLiq=%s keepLiq=%s", tokenID.String(), keepPct, withdraw.String(), keep.String())
-
-	// 1) DecreaseLiquidity (partial)
-	intent := strategy.Intent{
-		ID:      fmt.Sprintf("DRAIN_%s", tokenID.String()),
-		Type:    strategy.IntentWithdraw,
-		PoolID:  "",
-		ChainID: ethGw.ChainID().Int64(),
-		Metadata: map[string]string{
-			"token_id":  tokenID.String(),
-			"liquidity": withdraw.String(),
-			"target":    pmAddr.Hex(),
-			"value":     "0",
-		},
-	}
-	data, err := adapter.BuildDecreaseLiquidityData(intent)
-	if err != nil {
-		return false, fmt.Errorf("build decreaseLiquidity: %w", err)
-	}
-	intent.Metadata["calldata"] = hex.EncodeToString(data)
-	res, err := ethGw.Send(ctx, intent)
-	if err != nil {
-		return false, fmt.Errorf("send decreaseLiquidity: %w", err)
-	}
-	_ = waitForReceipt(ctx, ethGw, res.Hash)
-
-	// 2) Collect (best-effort)
-	collectIntent := strategy.Intent{
-		ID:      fmt.Sprintf("COLLECT_DRAIN_%s", tokenID.String()),
-		Type:    strategy.IntentCollectFee,
-		PoolID:  "",
-		ChainID: ethGw.ChainID().Int64(),
-		Metadata: map[string]string{
-			"token_id":  tokenID.String(),
-			"recipient": ethGw.Address(),
-			"target":    pmAddr.Hex(),
-			"value":     "0",
-		},
-	}
-	collectData, err := adapter.BuildCollectData(collectIntent)
-	if err != nil {
-		return false, fmt.Errorf("build collect: %w", err)
-	}
-	collectIntent.Metadata["calldata"] = hex.EncodeToString(collectData)
-	res2, err := ethGw.Send(ctx, collectIntent)
-	if err != nil {
-		return false, fmt.Errorf("send collect: %w", err)
-	}
-	_ = waitForReceipt(ctx, ethGw, res2.Hash)
-	return true, nil
 }
 
 // listMatchingPositions scans wallet's UniV3 NFT positions and returns those matching (token0,token1,fee).
@@ -1671,752 +1340,7 @@ func closePositionsForPool(ctx context.Context, ethGw *gateway.EthGateway, adapt
 	return nil
 }
 
-// startPositionSync periodically updates poolStates[].position from on-chain UniV3 positions.
-// This prevents Strategy from minting multiple positions for the same pool.
-//
-// If we don't yet know the pool's tokenId (config + DB empty), we fall back to scanning
-// wallet positions via tokenOfOwnerByIndex and adopt the best matching position.
-func startPositionSync(ctx context.Context, cfgValue *atomic.Value, store *storage.Store, gwSelector func(int64) gateway.Gateway) {
-	syncOnce := func() {
-		cfg, _ := cfgValue.Load().(*config.AppConfig)
-		if cfg == nil {
-			return
-		}
-		for _, pool := range cfg.Pools {
-			gw := gwSelector(pool.ChainID)
-			ethGw, ok := gw.(*gateway.EthGateway)
-			if !ok || ethGw == nil || pool.PositionManager == "" {
-				continue
-			}
-
-			adapter := univ3.NewAdapter(pool.PositionManager)
-
-			// Prefer learned tokenId from storage over config, so rebalances that mint a new NFT
-			// keep working even if config.yaml wasn't manually updated yet.
-			tokenID := ""
-			if store != nil {
-				if tid, err := store.GetPoolPositionTokenID(pool.ID, pool.ChainID); err == nil {
-					tokenID = strings.TrimSpace(tid)
-				}
-			}
-			if tokenID == "" {
-				tokenID = strings.TrimSpace(pool.PositionTokenID)
-			}
-			// If we still don't know the tokenId, scan wallet positions and adopt a matching one.
-			// This prevents "same pair minted many LPs" after restarts when config wasn't updated.
-			if tokenID == "" {
-				pos, err := listMatchingPositions(ctx, ethGw, adapter, pool, 64)
-				if err != nil {
-					continue
-				}
-				if len(pos) == 0 {
-					continue
-				}
-
-				var best *uniV3PositionSnapshot
-				for i := range pos {
-					if pos[i].TokenID == nil {
-						continue
-					}
-					if best == nil {
-						best = &pos[i]
-						continue
-					}
-					// Prefer higher liquidity, then higher tokenId as a stable tie-break.
-					liqA := pos[i].Liquidity
-					liqB := best.Liquidity
-					if liqA != nil && liqB != nil {
-						if liqA.Cmp(liqB) > 0 {
-							best = &pos[i]
-							continue
-						}
-						if liqA.Cmp(liqB) == 0 && pos[i].TokenID.Cmp(best.TokenID) > 0 {
-							best = &pos[i]
-							continue
-						}
-					} else if liqA != nil && (liqB == nil || liqB.Sign() <= 0) {
-						best = &pos[i]
-						continue
-					}
-				}
-				if best == nil || best.TokenID == nil {
-					continue
-				}
-				tokenID = best.TokenID.String()
-				if store != nil {
-					_ = store.UpsertPoolPosition(pool.ID, pool.ChainID, tokenID)
-				}
-			}
-
-			pmAddr := common.HexToAddress(pool.PositionManager)
-			tid, ok := new(big.Int).SetString(tokenID, 10)
-			if !ok || tid.Sign() <= 0 {
-				continue
-			}
-			dataPos, err := adapter.ParsedABI.Pack("positions", tid)
-			if err != nil {
-				continue
-			}
-			resPos, err := ethGw.Call(ctx, pmAddr, dataPos)
-			if err != nil {
-				continue
-			}
-			upPos, err := adapter.ParsedABI.Unpack("positions", resPos)
-			if err != nil || len(upPos) < 8 {
-				continue
-			}
-			tL, okTL := asInt64(upPos[5])
-			tU, okTU := asInt64(upPos[6])
-			liq, okLiq := asBigInt(upPos[7])
-			if !okTL || !okTU || !okLiq {
-				continue
-			}
-
-			poolStateMu.Lock()
-			if rt, exists := poolStates[pool.ID]; exists && rt != nil {
-				rt.positionTokenID = tokenID
-				if liq == nil || liq.Sign() <= 0 {
-					rt.position = engine.CurrentPosition{}
-				} else {
-					liqF, _ := new(big.Float).SetInt(liq).Float64()
-					rt.position = engine.CurrentPosition{LowerTick: tL, UpperTick: tU, Liquidity: liqF}
-				}
-			}
-			poolStateMu.Unlock()
-		}
-	}
-
-	syncOnce()
-	t := time.NewTicker(30 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			syncOnce()
-		}
-	}
-}
-
-func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, riskMgr *risk.Manager, guard *poolguard.Guard, gwSelector func(int64) gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, router *univ3.Router, swapHelperByChain map[int64]*univ3.SwapHelper, rebal rebalancer.Rebalancer, priceProvider func(string) float64, quoterByChain map[int64]*univ3.Quoter) {
-	go func() {
-		for {
-			intent := queue.Dequeue()
-
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			if riskMgr.ShouldThrottle(2 * time.Second) {
-				log.Printf("[IntentExecutor] throttling intent %s due to min interval", intent.ID)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-
-			gw := gwSelector(intent.ChainID)
-			executeIntent(ctx, cfgValue, intent, riskMgr, guard, gw, store, stream, adapter, router, swapHelperByChain, rebal, priceProvider, quoterByChain)
-		}
-	}()
-}
-
-func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, router *univ3.Router, swapHelperByChain map[int64]*univ3.SwapHelper, rebal rebalancer.Rebalancer, priceProvider func(string) float64, quoterByChain map[int64]*univ3.Quoter) {
-	if intent.Metadata == nil {
-		intent.Metadata = make(map[string]string)
-	}
-	if gw == nil {
-		log.Printf("[IntentExecutor] no gateway available for chain %d", intent.ChainID)
-		return
-	}
-	if err := riskMgr.CanProceed(); err != nil {
-		log.Printf("[Risk] skip intent %s: %v", intent.ID, err)
-		// return // Dont return here to allow seeing logs? No, should return.
-		return
-	}
-
-	token0Addr := intent.Metadata["token0"]
-	token1Addr := intent.Metadata["token1"]
-	check := guard.CheckPool(context.Background(), intent.PoolID, intent.ChainID, token0Addr, token1Addr)
-	if check.Risk == poolguard.RiskDanger {
-		log.Printf("[PoolGuard] block intent %s: %s", intent.ID, check.Reason)
-		return
-	}
-
-	currentCfg := cfgValue.Load().(*config.AppConfig)
-	isDryRun := currentCfg != nil && currentCfg.Strategy.DryRun
-	poolCfg, ok := findPoolConfig(currentCfg, intent.PoolID)
-	if !ok {
-		log.Printf("[IntentExecutor] Unknown pool %s", intent.PoolID)
-		return
-	}
-
-	// Hard cap per-pool rebalance attempts (prevents runaway churn).
-	if intent.Type == strategy.IntentRebalance && !isDryRun {
-		if !rebalanceLimiter.Allow(intent.PoolID, poolCfg.MaxDailyRebalances) {
-			log.Printf("[Risk] skip intent %s: pool %s max_daily_rebalances=%d exceeded", intent.ID, intent.PoolID, poolCfg.MaxDailyRebalances)
-			return
-		}
-	}
-
-	// Use per-pool PositionManager (avoids cfg.Pools[0] coupling).
-	localAdapter := adapter
-	if poolCfg.PositionManager != "" {
-		if localAdapter == nil || !strings.EqualFold(localAdapter.TargetAddress().Hex(), poolCfg.PositionManager) {
-			localAdapter = univ3.NewAdapter(poolCfg.PositionManager)
-		}
-	}
-
-	// Resolve known UniV3 position tokenId for this pool (config -> store -> runtime).
-	existingTokenID := ""
-	if rt, ok := getPoolRuntimeSnapshot(intent.PoolID); ok && rt != nil {
-		existingTokenID = strings.TrimSpace(rt.positionTokenID)
-	}
-	if existingTokenID == "" && store != nil {
-		if tid, err := store.GetPoolPositionTokenID(intent.PoolID, intent.ChainID); err == nil {
-			existingTokenID = strings.TrimSpace(tid)
-		}
-	}
-	if existingTokenID == "" {
-		existingTokenID = strings.TrimSpace(poolCfg.PositionTokenID)
-	}
-	if existingTokenID != "" {
-		intent.Metadata["position_token_id"] = existingTokenID
-	}
-
-	// Guard the whole execution (including close-existing-position) to avoid generating/queuing
-	// overlapping intents while we temporarily have no LP on-chain.
-	poolMintGuard := getMintGuard(intent.PoolID)
-	poolMintGuard.Store(true)
-	defer poolMintGuard.Store(false)
-
-	// If we're rebalancing an active LP, close existing matching positions first so
-	// subsequent planning uses "wallet balance + recovered LP funds" as the baseline.
-	//
-	// NOTE: On testnets where we are the only LP, fully removing liquidity makes swaps against
-	// the pool revert. When configured, we keep a small residual liquidity until swaps are done.
-	ethGw, isEthGw := gw.(*gateway.EthGateway)
-	var deferredCloseTokenID *big.Int
-	if intent.Type == strategy.IntentRebalance && isEthGw && !isDryRun {
-		if localAdapter == nil {
-			log.Printf("[IntentExecutor] missing position manager adapter for pool %s", intent.PoolID)
-			riskMgr.RecordFailure()
-			return
-		}
-		if existingTokenID != "" {
-			if tokenID, ok := new(big.Int).SetString(existingTokenID, 10); ok && tokenID.Sign() > 0 {
-				log.Printf("[Rebalance] closing existing position tokenId=%s before planning", existingTokenID)
-				pmAddr := common.HexToAddress(poolCfg.PositionManager)
-				keepPct := 0.0
-				if currentCfg != nil {
-					keepPct = currentCfg.Strategy.Rebalance.KeepLiquidityPctForSwaps
-				}
-				if keepPct > 0 {
-					// Drain most liquidity but keep a small residual until swaps complete.
-					deferred, err := drainPositionTokenID(ctx, ethGw, localAdapter, pmAddr, tokenID, keepPct)
-					if err != nil {
-						log.Printf("[IntentExecutor] drain existing position failed (pool %s): %v", intent.PoolID, err)
-						riskMgr.RecordFailure()
-						return
-					}
-					if deferred {
-						deferredCloseTokenID = tokenID
-					} else {
-						// Nothing to defer; proceed with full close.
-						if err := closePositionTokenID(ctx, ethGw, localAdapter, pmAddr, tokenID); err != nil {
-							log.Printf("[IntentExecutor] close existing position failed (pool %s): %v", intent.PoolID, err)
-							riskMgr.RecordFailure()
-							return
-						}
-						clearPoolRuntimePosition(intent.PoolID)
-						if store != nil {
-							if err := store.ClearPoolPosition(intent.PoolID, intent.ChainID); err != nil {
-								log.Printf("[Storage] clear pool position failed (pool=%s chain=%d): %v", intent.PoolID, intent.ChainID, err)
-							}
-						}
-						existingTokenID = ""
-						intent.Metadata["position_token_id"] = ""
-					}
-				} else {
-					// Default behavior: fully close+burn before planning.
-					if err := closePositionTokenID(ctx, ethGw, localAdapter, pmAddr, tokenID); err != nil {
-						log.Printf("[IntentExecutor] close existing position failed (pool %s): %v", intent.PoolID, err)
-						riskMgr.RecordFailure()
-						return
-					}
-					clearPoolRuntimePosition(intent.PoolID)
-					if store != nil {
-						if err := store.ClearPoolPosition(intent.PoolID, intent.ChainID); err != nil {
-							log.Printf("[Storage] clear pool position failed (pool=%s chain=%d): %v", intent.PoolID, intent.ChainID, err)
-						}
-					}
-					existingTokenID = ""
-					intent.Metadata["position_token_id"] = ""
-				}
-			}
-		}
-	}
-
-	// Capture pre-action wallet balances for PnL/cost-basis calculations.
-	var preBal0, preBal1 *big.Int
-	shouldComputeWalletDelta := intent.Type == strategy.IntentWithdraw || intent.Type == strategy.IntentCollectFee || intent.Type == strategy.IntentRebalance
-	if shouldComputeWalletDelta {
-		if ethGw, ok := gw.(*gateway.EthGateway); ok {
-			preBal0, _ = ethGw.BalanceOfERC20(ctx, common.HexToAddress(poolCfg.Token0))
-			preBal1, _ = ethGw.BalanceOfERC20(ctx, common.HexToAddress(poolCfg.Token1))
-		}
-	}
-	runtimeState, hasRuntime := getPoolRuntimeSnapshot(intent.PoolID)
-	if !hasRuntime {
-		log.Printf("[IntentExecutor] Pool runtime snapshot missing for %s", intent.PoolID)
-	}
-	var poolStateSnap rebalancer.PoolStateSnapshot
-	if runtimeState != nil {
-		poolStateSnap.CurrentTick = runtimeState.currentTick
-		if runtimeState.sqrtPrice != nil {
-			poolStateSnap.SqrtPriceX96 = new(big.Int).Set(runtimeState.sqrtPrice)
-		}
-	}
-
-	// --- Rebalancer Logic ---
-	// Only run if not dry_run (or run in dry_run to simulate logs)
-	// And if gw available for balance check
-	if rebal != nil && isEthGw && (intent.Type == strategy.IntentRebalance || intent.TargetNotionalPct > 0) {
-		log.Printf("[Rebalancer] analyzing intent %s...", intent.ID)
-		log.Printf("[Debug] Intent Metadata: %+v", intent.Metadata)
-
-		// 1. Fetch Balances
-		bals := make(map[string]*big.Int)
-		// Helper to fetch
-		fetchBal := func(addr string) {
-			if addr == "" {
-				return
-			}
-			if b, err := ethGw.BalanceOfERC20(ctx, common.HexToAddress(addr)); err == nil {
-				bals[strings.ToLower(addr)] = b
-			}
-		}
-		fetchBal(token0Addr)
-		fetchBal(token1Addr)
-		// Include pool-configured stable tokens to improve budget estimation (e.g., USDC).
-		for _, st := range poolCfg.StableTokens {
-			fetchBal(st)
-		}
-		// Assume configured stablecoin?
-		// For Phase 1, we might just scan a known stable if in config, but let's stick to T0/T1 if undefined.
-
-		token0 := strings.ToLower(token0Addr)
-		token1 := strings.ToLower(token1Addr)
-
-		d0 := poolCfg.Token0Decimals
-		d1 := poolCfg.Token1Decimals
-		if d0 == 0 {
-			d0 = 18
-		}
-		if d1 == 0 {
-			d1 = 18
-		}
-		poolFee := poolCfg.Fee
-		if poolFee == 0 {
-			poolFee = 3000
-		}
-		intent.Metadata["fee"] = strconv.Itoa(poolFee)
-
-		stables := make([]string, 0, len(poolCfg.StableTokens))
-		for _, st := range poolCfg.StableTokens {
-			stables = append(stables, strings.ToLower(st))
-		}
-
-		input := rebalancer.RebalanceInput{
-			Intent:        intent,
-			WalletBalance: bals,
-			Prices: map[string]float64{
-				token0: priceProvider(token0),
-				token1: priceProvider(token1),
-			},
-			PoolConfig: rebalancer.PoolConfig{
-				PoolID:         intent.PoolID,
-				Token0:         token0,
-				Token1:         token1,
-				Token0Decimals: d0,
-				Token1Decimals: d1,
-				Fee:            poolFee,
-				MaxCapPct:      poolCfg.MaxCapPct,
-				StableTokens:   stables,
-			},
-			RiskLimits: rebalancer.RiskLimits{
-				MinIdleCashPct:     currentCfg.Wallet.MinIdlePct,
-				MaxSwapSlippagePct: currentCfg.Risk.MaxSwapSlippagePct,
-			},
-			State: poolStateSnap,
-		}
-
-		// 3. Plan
-		if plan, err := rebal.Rebalance(ctx, input); err == nil && plan != nil {
-			log.Printf("[Rebalancer] Plan generated: %d swaps", len(plan.Swaps))
-
-			// 4. Update Intent Amounts (Target)
-			if plan.FinalLP.Amount0 != nil {
-				intent.Metadata["amount0"] = plan.FinalLP.Amount0.String()
-			}
-			if plan.FinalLP.Amount1 != nil {
-				intent.Metadata["amount1"] = plan.FinalLP.Amount1.String()
-			}
-
-			// 5. Execute Swaps
-			quoter := quoterByChain[intent.ChainID]
-			swapHelper := (*univ3.SwapHelper)(nil)
-			if swapHelperByChain != nil {
-				swapHelper = swapHelperByChain[intent.ChainID]
-			}
-			swapStatsList := make([]swapStats, 0, len(plan.Swaps))
-			for _, s := range plan.Swaps {
-				if currentCfg != nil && currentCfg.Strategy.DryRun {
-					log.Printf("[Rebalancer] dry-run enabled; skip executing swap %s->%s", s.FromToken.Hex(), s.ToToken.Hex())
-					continue
-				}
-				swapUSD := s.EstimatedUSD
-				if swapUSD > 0 {
-					if err := riskMgr.CanSwap(swapUSD); err != nil {
-						log.Printf("[Risk] Swap rejected (%s): %v", intent.ID, err)
-						return
-					}
-				}
-
-				// 2. Execute Swap
-				var balBeforeOut *big.Int
-				if ethGw != nil {
-					balBeforeOut, _ = ethGw.BalanceOfERC20(ctx, s.ToToken)
-				}
-				// If we are executing swaps via SwapHelper, the underlying pool must have active liquidity.
-				// On testnets, if the bot is the only LP and liquidity is temporarily 0, skip swaps so we can mint first.
-				if swapHelper != nil {
-					if runtimeState == nil || runtimeState.poolLiquidity == nil || runtimeState.poolLiquidity.Sign() <= 0 {
-						log.Printf("[Rebalancer] skip swap (pool liquidity=0) to allow mint first (from=%s to=%s)", s.FromToken.Hex(), s.ToToken.Hex())
-						continue
-					}
-				}
-				res, err := executeSwap(ctx, gw, router, swapHelper, poolCfg, s, priceProvider, quoter, s.SlippagePct)
-				if err != nil {
-					log.Printf("[Rebalancer] Swap failed: %v. Aborting intent.", err)
-					riskMgr.RecordFailure()
-					return
-				}
-
-				// 3. Wait for receipt instead of sleeping
-				if ethGw != nil && res != nil {
-					rcpt := waitForReceipt(ctx, ethGw, res.Hash)
-					if rcpt == nil || rcpt.Status != 1 {
-						log.Printf("[Rebalancer] Swap tx reverted (hash=%s)", res.Hash.Hex())
-						riskMgr.RecordFailure()
-						return
-					}
-				}
-				if swapUSD > 0 {
-					riskMgr.RecordSwap(swapUSD)
-				}
-
-				// 4. Capture actual out and slippage
-				var actualOut *big.Int
-				if ethGw != nil {
-					balAfterOut, _ := ethGw.BalanceOfERC20(ctx, s.ToToken)
-					if balBeforeOut != nil && balAfterOut != nil {
-						actualOut = new(big.Int).Sub(balAfterOut, balBeforeOut)
-					}
-				}
-				st := swapStats{
-					FromToken:    s.FromToken.Hex(),
-					ToToken:      s.ToToken.Hex(),
-					AmountIn:     s.AmountIn.String(),
-					MinAmountOut: s.MinAmountOut.String(),
-					TxHash:       res.Hash.Hex(),
-				}
-				// Estimate swap PnL as actual USD out minus USD in using current price snapshot.
-				pFrom := priceProvider(strings.ToLower(s.FromToken.Hex()))
-				pTo := priceProvider(strings.ToLower(s.ToToken.Hex()))
-				usdIn := floatFromBigInt(s.AmountIn, s.FromDecimals) * pFrom
-				usdOut := 0.0
-				if actualOut != nil {
-					st.ActualOut = actualOut.String()
-					usdOut = floatFromBigInt(actualOut, s.ToDecimals) * pTo
-					if s.MinAmountOut != nil && s.MinAmountOut.Sign() > 0 && actualOut.Cmp(s.MinAmountOut) < 0 {
-						log.Printf("[Rebalancer] Swap output below minOut: actual=%s min=%s (hash=%s)", actualOut.String(), s.MinAmountOut.String(), res.Hash.Hex())
-						riskMgr.RecordFailure()
-						return
-					}
-					if s.MinAmountOut != nil && s.MinAmountOut.Sign() > 0 {
-						fActual, _ := new(big.Float).SetInt(actualOut).Float64()
-						fMin, _ := new(big.Float).SetInt(s.MinAmountOut).Float64()
-						if fMin > 0 {
-							st.SlippagePct = (fMin - fActual) / fMin
-						}
-					}
-				}
-				if usdIn > 0 || usdOut > 0 {
-					st.PnLUSD = usdOut - usdIn
-				}
-				swapStatsList = append(swapStatsList, st)
-
-			}
-
-			if len(swapStatsList) > 0 {
-				totalSwapPnL := 0.0
-				for _, st := range swapStatsList {
-					totalSwapPnL += st.PnLUSD
-				}
-				intent.ExpectedPnL += totalSwapPnL
-				intent.Metadata["swap_pnl_usd"] = fmt.Sprintf("%.6f", totalSwapPnL)
-				if b, err := json.Marshal(swapStatsList); err == nil {
-					intent.Metadata["swap_details"] = string(b)
-				}
-			}
-
-		} else if err != nil {
-			log.Printf("[Rebalancer] Error: %v", err)
-			log.Printf("[IntentExecutor] Aborting intent %s due to rebalancer error", intent.ID)
-			riskMgr.RecordFailure()
-			return // ⚠️ CRITICAL: Stop execution if rebalancer fails
-		}
-	}
-
-	// --- Refresh & Clamp Amounts for Minting ---
-	// Since swaps executed, actual balance might be slightly less than target due to fees.
-	// We clamp intent amounts to actual balance to ensure Mint succeeds.
-	if ethGw, ok := gw.(*gateway.EthGateway); ok {
-		// If we kept residual liquidity for swaps, finalize full close+burn before minting the new position.
-		if deferredCloseTokenID != nil && deferredCloseTokenID.Sign() > 0 {
-			pmAddr := common.HexToAddress(poolCfg.PositionManager)
-			log.Printf("[Rebalance] finalizing close of tokenId=%s after swaps", deferredCloseTokenID.String())
-			if err := closePositionTokenID(ctx, ethGw, localAdapter, pmAddr, deferredCloseTokenID); err != nil {
-				log.Printf("[IntentExecutor] finalize close failed (pool %s): %v", intent.PoolID, err)
-				riskMgr.RecordFailure()
-				return
-			}
-			clearPoolRuntimePosition(intent.PoolID)
-			if store != nil {
-				if err := store.ClearPoolPosition(intent.PoolID, intent.ChainID); err != nil {
-					log.Printf("[Storage] clear pool position failed (pool=%s chain=%d): %v", intent.PoolID, intent.ChainID, err)
-					// Continue; this is persistence-only.
-				}
-			}
-			intent.Metadata["position_token_id"] = ""
-			deferredCloseTokenID = nil
-		}
-
-		t0 := common.HexToAddress(intent.Metadata["token0"])
-		t1 := common.HexToAddress(intent.Metadata["token1"])
-
-		if bal0, err := ethGw.BalanceOfERC20(ctx, t0); err == nil {
-			if amt0, ok := new(big.Int).SetString(intent.Metadata["amount0"], 10); ok {
-				if bal0.Cmp(amt0) < 0 {
-					log.Printf("[MintGuard] Clamping Amount0: Target %s -> Balance %s", amt0, bal0)
-					intent.Metadata["amount0"] = bal0.String()
-				}
-			}
-		}
-		if bal1, err := ethGw.BalanceOfERC20(ctx, t1); err == nil {
-			if amt1, ok := new(big.Int).SetString(intent.Metadata["amount1"], 10); ok {
-				if bal1.Cmp(amt1) < 0 {
-					log.Printf("[MintGuard] Clamping Amount1: Target %s -> Balance %s", amt1, bal1)
-					intent.Metadata["amount1"] = bal1.String()
-				}
-			}
-		}
-	}
-	// ------------------------
-
-	intent.Metadata["dry_run"] = "false" // overwritten below
-	log.Printf("[IntentExecutor] executing %s", intent.ID)
-
-	var txHash string
-	var status string
-
-	// Use config dry-run.
-	intent.Metadata["dry_run"] = fmt.Sprintf("%v", isDryRun)
-	log.Printf("[IntentExecutor] dry_run=%v", isDryRun)
-
-	log.Println("[IntentExecutor] Mint phase start (no fixed sleep)")
-	if !isDryRun && localAdapter != nil {
-		if intent.Type != strategy.IntentRebalance {
-			log.Printf("[IntentExecutor] skip mint phase for non-rebalance intent type=%s", intent.Type)
-			return
-		}
-
-		if addrProvider, ok := gw.(interface{ Address() string }); ok {
-			intent.Metadata["recipient"] = addrProvider.Address()
-		} else {
-			log.Printf("[IntentExecutor] recipient unavailable (gateway has no Address())")
-			riskMgr.RecordFailure()
-			return
-		}
-		intent.Metadata["target"] = localAdapter.TargetAddress().Hex()
-
-		// Ensure Allowance for PositionManager
-		if ethGw, ok := gw.(*gateway.EthGateway); ok {
-			// Find Token0/Token1 and Amounts
-			// We parse from Metadata because Plan might not be fully carried here if Rebalance skipped?
-			// Actually RebalancePlan updates intent.Metadata["amount0"] etc.
-			// Let's parse
-
-			// Note: We need to know token addresses. They are in Metadata "token0", "token1" if Strategy set them.
-			t0Addr := common.HexToAddress(intent.Metadata["token0"])
-			t1Addr := common.HexToAddress(intent.Metadata["token1"])
-
-			amt0, _ := new(big.Int).SetString(intent.Metadata["amount0"], 10)
-			amt1, _ := new(big.Int).SetString(intent.Metadata["amount1"], 10)
-
-			if amt0 != nil && amt0.Sign() > 0 {
-				if err := ethGw.EnsureAllowance(ctx, t0Addr, localAdapter.TargetAddress(), amt0); err != nil {
-					log.Printf("[IntentExecutor] Approve Token0 failed: %v", err)
-					return // or continue? better return to avoid revert.
-				}
-			}
-			if amt1 != nil && amt1.Sign() > 0 {
-				if err := ethGw.EnsureAllowance(ctx, t1Addr, localAdapter.TargetAddress(), amt1); err != nil {
-					log.Printf("[IntentExecutor] Approve Token1 failed: %v", err)
-					return
-				}
-			}
-		}
-
-		if data, err := localAdapter.BuildMintData(intent); err == nil {
-			intent.Metadata["calldata"] = hex.EncodeToString(data)
-		} else {
-			log.Printf("[Adapter] build calldata failed: %v", err)
-			riskMgr.RecordFailure()
-			return
-		}
-	}
-
-	if !isDryRun {
-		if ethGw, ok := gw.(*gateway.EthGateway); ok {
-			if !hasSufficientBalances(ctx, ethGw, intent.Metadata) {
-				log.Printf("[BalanceGuard] skip intent %s due to insufficient token balance", intent.ID)
-				riskMgr.RecordFailure()
-				return
-			}
-		}
-	}
-
-	var minedReceipt *types.Receipt
-	if isDryRun || gw == nil {
-		txHash = "0xSIMULATED_" + intent.ID
-		status = "simulated"
-		log.Println(">>> Dry Run: Simulated Tx Execution")
-		riskMgr.RecordSuccess()
-	} else {
-		result, err := gw.Send(ctx, intent)
-		if err != nil {
-			log.Printf("[Gateway] send intent %s failed: %v", intent.ID, err)
-			status = "failed"
-			riskMgr.RecordFailure()
-		} else {
-			txHash = result.Hash.Hex()
-			status = string(result.Status)
-			riskMgr.RecordSuccess()
-			// For mint/withdraw intents, wait for receipt to avoid sleeping.
-			if ethGw, ok := gw.(*gateway.EthGateway); ok && result.Status == gateway.StatusPending {
-				minedReceipt = waitForReceipt(ctx, ethGw, result.Hash)
-			}
-		}
-	}
-
-	// If we just minted a new position, extract tokenId from receipt and persist it.
-	if !isDryRun && minedReceipt != nil && intent.Type == strategy.IntentRebalance {
-		if ethGw, ok := gw.(*gateway.EthGateway); ok {
-			pmAddr := common.HexToAddress(poolCfg.PositionManager)
-			newTokenID := parseMintedPositionTokenID(minedReceipt, pmAddr, ethGw.WalletAddress())
-			if newTokenID != nil && newTokenID.Sign() > 0 {
-				tokenStr := newTokenID.String()
-				if store != nil {
-					if err := store.UpsertPoolPosition(intent.PoolID, intent.ChainID, tokenStr); err != nil {
-						log.Printf("[Storage] upsert pool position failed (pool=%s chain=%d tokenId=%s): %v", intent.PoolID, intent.ChainID, tokenStr, err)
-					}
-				}
-				// Refresh runtime position snapshot from chain (ticks/liquidity).
-				if tL, tU, liq, ok, _ := fetchPositionByTokenID(ctx, ethGw, localAdapter, pmAddr, newTokenID); ok && liq != nil && liq.Sign() > 0 {
-					liqF, _ := new(big.Float).SetInt(liq).Float64()
-					setPoolRuntimePosition(intent.PoolID, tokenStr, engine.CurrentPosition{LowerTick: tL, UpperTick: tU, Liquidity: liqF})
-				} else {
-					setPoolRuntimePosition(intent.PoolID, tokenStr, engine.CurrentPosition{})
-				}
-				intent.Metadata["position_token_id"] = tokenStr
-				log.Printf("[Rebalance] minted new position tokenId=%s", tokenStr)
-				setLastRebalanceAt(intent.PoolID, time.Now())
-			} else {
-				log.Printf("[Rebalance] warning: could not parse minted tokenId from receipt %s", txHash)
-			}
-		}
-	}
-
-	// Compute wallet delta for mint/rebalance/collect/withdraw and update cost basis / PnL.
-	if shouldComputeWalletDelta {
-		if ethGw, ok := gw.(*gateway.EthGateway); ok {
-			postBal0, _ := ethGw.BalanceOfERC20(ctx, common.HexToAddress(poolCfg.Token0))
-			postBal1, _ := ethGw.BalanceOfERC20(ctx, common.HexToAddress(poolCfg.Token1))
-			p0 := priceProvider(strings.ToLower(poolCfg.Token0))
-			p1 := priceProvider(strings.ToLower(poolCfg.Token1))
-			usdDelta0 := floatFromBigInt(new(big.Int).Sub(postBal0, preBal0), poolCfg.Token0Decimals) * p0
-			usdDelta1 := floatFromBigInt(new(big.Int).Sub(postBal1, preBal1), poolCfg.Token1Decimals) * p1
-			deltaUSD := usdDelta0 + usdDelta1
-
-			// Mint/rebalance: negative delta is capital deployed; use as cost basis.
-			if store != nil && intent.Type == strategy.IntentRebalance {
-				if deltaUSD < 0 {
-					_ = store.UpsertPoolCostBasis(intent.PoolID, intent.ChainID, -deltaUSD)
-				}
-				intent.Metadata["wallet_delta_usd"] = fmt.Sprintf("%.6f", deltaUSD)
-			}
-
-			// Collect/withdraw: positive delta is realized return.
-			if intent.Type == strategy.IntentWithdraw || intent.Type == strategy.IntentCollectFee {
-				intent.Metadata["wallet_pnl_usd"] = fmt.Sprintf("%.6f", deltaUSD)
-				if store != nil && intent.Type == strategy.IntentWithdraw {
-					basis, _ := store.GetPoolCostBasis(intent.PoolID, intent.ChainID)
-					if basis > 0 {
-						intent.ExpectedPnL += deltaUSD - basis
-						_ = store.ClearPoolCostBasis(intent.PoolID, intent.ChainID)
-					} else {
-						intent.ExpectedPnL += deltaUSD
-					}
-				} else {
-					intent.ExpectedPnL += deltaUSD
-				}
-			}
-		}
-	}
-
-	// Estimate total PnL from swaps only. Mint/collect PnL still TODO.
-	totalPnL := intent.ExpectedPnL
-
-	record := &storage.TradeRecord{
-		Time:            time.Now(),
-		IntentID:        intent.ID,
-		Type:            string(intent.Type),
-		PoolID:          intent.PoolID,
-		ChainID:         intent.ChainID,
-		TxHash:          txHash,
-		TargetTo:        intent.Metadata["target"],
-		Status:          status,
-		Token0Amt:       intent.Metadata["amount0"],
-		Token1Amt:       intent.Metadata["amount1"],
-		SwapDetails:     intent.Metadata["swap_details"],
-		PnL:             totalPnL,
-		IsSimulation:    isDryRun,
-		StrategyVersion: intent.StrategyVersion,
-		RiskMode:        intent.RiskMode,
-		NotionalUSD:     parseMetadataFloat(intent.Metadata, "notional_usd"),
-		GasCostUSD:      parseMetadataFloat(intent.Metadata, "gas_usd"),
-	}
-	if err := store.SaveTrade(record); err != nil {
-		log.Printf("Failed to save trade: %v", err)
-	}
-
-	_ = stream.Publish(ctx, events.TopicIntentExec, record)
-}
-
-func executeSwap(ctx context.Context, gw gateway.Gateway, router *univ3.Router, swapHelper *univ3.SwapHelper, poolCfg config.PoolConfig, action rebalancer.SwapAction, priceProvider func(string) float64, quoter *univ3.Quoter, slippagePct float64) (*gateway.TxResult, error) {
+func executeSwap(ctx context.Context, gw gateway.Gateway, router *univ3.Router, swapHelper *univ3.SwapHelper, poolCfg config.PoolConfig, action rebalancer.SwapAction, priceProvider func(string) float64, quoter *univ3.Quoter, slippagePct float64, store *storage.Store, stream events.Stream, parentIntentID string, stepIndex *int) (*gateway.TxResult, error) {
 	// 1. Build Calldata
 	if router == nil && swapHelper == nil {
 		return nil, fmt.Errorf("swap executor not initialized (router+swapHelper both nil)")
@@ -2518,6 +1442,23 @@ func executeSwap(ctx context.Context, gw gateway.Gateway, router *univ3.Router, 
 	if err != nil {
 		return nil, err
 	}
+	idx := 0
+	if stepIndex != nil {
+		idx = *stepIndex
+		*stepIndex++
+	}
+	bot.RecordStepSent(ctx, store, stream, parentIntentID, idx, "swap", res.Hash.Hex(), map[string]interface{}{
+		"from":      action.FromToken.Hex(),
+		"to":        action.ToToken.Hex(),
+		"amount_in": action.AmountIn.String(),
+		"fee":       action.Fee,
+		"min_out": func() string {
+			if action.MinAmountOut == nil {
+				return ""
+			}
+			return action.MinAmountOut.String()
+		}(),
+	})
 	return res, nil
 }
 
@@ -2570,7 +1511,7 @@ func startReceiptWatcher(ctx context.Context, receipts <-chan gateway.ReceiptRes
 			if !ok {
 				return
 			}
-			gasCostNative := weiToEther(receipt.EffectiveGasPrice, receipt.GasUsed)
+			gasCostNative := bot.WeiToEther(receipt.EffectiveGasPrice, receipt.GasUsed)
 			// Update legacy metadata in case executor wants to use it.
 			// We don't have intent object here, so only store level update.
 			effPriceStr := ""
@@ -2588,6 +1529,18 @@ func startReceiptWatcher(ctx context.Context, receipts <-chan gateway.ReceiptRes
 			if err := store.UpdateTradeStatusWithGasAndChainMeta(receipt.Hash.Hex(), string(receipt.Status), gasCostNative, receipt.GasUsed, effPriceStr, receipt.Nonce, from, to); err != nil {
 				log.Printf("[ReceiptWatcher] update %s failed: %v", receipt.Hash.Hex(), err)
 			}
+			_ = store.UpsertTxReceipt(&storage.TxReceiptRecord{
+				ChainID:           receipt.ChainID,
+				TxHash:            receipt.Hash.Hex(),
+				Nonce:             receipt.Nonce,
+				FromAddr:          from,
+				ToAddr:            to,
+				Status:            receipt.StatusCode,
+				GasUsed:           receipt.GasUsed,
+				EffectiveGasPrice: effPriceStr,
+				RevertReason:      receipt.RevertReason,
+				MinedAt:           time.Now(),
+			})
 			if gasCostNative > 0 && riskMgr != nil {
 				riskMgr.RecordGas(gasCostNative)
 			}
@@ -2706,11 +1659,12 @@ func runCleanup(ctx context.Context, gateways map[int64]*gateway.EthGateway, cfg
 		adapter := univ3.NewAdapter(pool.PositionManager)
 		pmAddr := common.HexToAddress(pool.PositionManager)
 		log.Printf("[Cleanup] closing pool=%s tokenId=%s", pool.ID, tokenID)
-		if err := closePositionTokenID(ctx, ethGw, adapter, pmAddr, tid); err != nil {
+		stepIndex := 0
+		if err := bot.ClosePositionTokenID(ctx, ethGw, adapter, pmAddr, tid, nil, nil, "", &stepIndex); err != nil {
 			log.Printf("[Cleanup] close failed pool=%s tokenId=%s: %v", pool.ID, tokenID, err)
 			continue
 		}
-		clearPoolRuntimePosition(pool.ID)
+		bot.ClearPoolRuntimePosition(pool.ID)
 		if store != nil {
 			_ = store.ClearPoolPosition(pool.ID, pool.ChainID)
 		}
@@ -2728,49 +1682,6 @@ func findPoolConfig(cfg *config.AppConfig, poolID string) (config.PoolConfig, bo
 		}
 	}
 	return config.PoolConfig{}, false
-}
-
-func syncPoolStatesFromConfig(cfg *config.AppConfig) {
-	poolStateMu.Lock()
-	defer poolStateMu.Unlock()
-	newStates := make(map[string]*poolRuntime, len(cfg.Pools))
-	for _, pool := range cfg.Pools {
-		if runtime, ok := poolStates[pool.ID]; ok {
-			runtime.cfg = pool
-			newStates[pool.ID] = runtime
-		} else {
-			newStates[pool.ID] = &poolRuntime{
-				cfg:      pool,
-				position: engine.CurrentPosition{},
-			}
-		}
-	}
-	poolStates = newStates
-}
-
-func syncMintGuardsFromConfig(cfg *config.AppConfig) {
-	mintGuardMu.Lock()
-	defer mintGuardMu.Unlock()
-	if poolMintGuards == nil {
-		poolMintGuards = map[string]*atomic.Bool{}
-	}
-	for _, pool := range cfg.Pools {
-		if _, ok := poolMintGuards[pool.ID]; !ok {
-			poolMintGuards[pool.ID] = &atomic.Bool{}
-		}
-	}
-	for id := range poolMintGuards {
-		exists := false
-		for _, pool := range cfg.Pools {
-			if pool.ID == id {
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			delete(poolMintGuards, id)
-		}
-	}
 }
 
 func buildStrategyMapWithPolicy(cfg *config.AppConfig, policy *strategy.PolicyEngine) map[string]*strategy.BasicStrategy {
@@ -2793,90 +1704,25 @@ func buildStrategyMap(cfg *config.AppConfig) map[string]*strategy.BasicStrategy 
 	return buildStrategyMapWithPolicy(cfg, strategy.NewPolicyEngine(nil))
 }
 
-func getMintGuard(poolID string) *atomic.Bool {
-	mintGuardMu.RLock()
-	defer mintGuardMu.RUnlock()
-	if guard, ok := poolMintGuards[poolID]; ok {
-		return guard
-	}
-	return &atomic.Bool{}
-}
-
-func initDexStates(chains []config.ChainConfig) map[int64]*dexstate.UniV3State {
-	states := make(map[int64]*dexstate.UniV3State)
-	for _, ch := range chains {
-		state, err := dexstate.NewUniV3State(ch.RPC)
-		if err != nil {
-			log.Printf("⚠️ Failed to connect RPC for chain %s: %v", ch.Name, err)
-			continue
-		}
-		states[ch.ID] = state
-		log.Printf("✅ Connected to RPC %s (chain %d)", ch.Name, ch.ID)
-	}
-	return states
-}
-
-func snapshotPoolRuntimes() []*poolRuntime {
-	poolStateMu.RLock()
-	defer poolStateMu.RUnlock()
-	result := make([]*poolRuntime, 0, len(poolStates))
-	for _, rt := range poolStates {
-		if clone := clonePoolRuntime(rt); clone != nil {
-			result = append(result, clone)
-		}
-	}
-	return result
-}
-
 func snapshotPoolsForAPI() []api.PoolStatus {
-	states := snapshotPoolRuntimes()
+	states := bot.SnapshotPoolRuntimes()
 	result := make([]api.PoolStatus, 0, len(states))
 	for _, rt := range states {
 		if rt == nil {
 			continue
 		}
 		sqrtPrice := ""
-		if rt.sqrtPrice != nil {
-			sqrtPrice = rt.sqrtPrice.String()
+		if rt.SqrtPriceX96 != nil {
+			sqrtPrice = rt.SqrtPriceX96.String()
 		}
 		result = append(result, api.PoolStatus{
-			PoolID:       rt.cfg.ID,
-			ChainID:      rt.cfg.ChainID,
-			DexPrice:     rt.dexPrice,
-			CurrentTick:  rt.currentTick,
+			PoolID:       rt.Cfg.ID,
+			ChainID:      rt.Cfg.ChainID,
+			DexPrice:     rt.DexPrice,
+			CurrentTick:  rt.CurrentTick,
 			SqrtPriceX96: sqrtPrice,
-			Liquidity:    fmt.Sprintf("%.6f", rt.position.Liquidity),
+			Liquidity:    fmt.Sprintf("%.6f", rt.Position.Liquidity),
 		})
 	}
 	return result
-}
-
-func getPoolRuntimeSnapshot(poolID string) (*poolRuntime, bool) {
-	poolStateMu.RLock()
-	defer poolStateMu.RUnlock()
-	rt, ok := poolStates[poolID]
-	if !ok {
-		return nil, false
-	}
-	return clonePoolRuntime(rt), true
-}
-
-func clonePoolRuntime(rt *poolRuntime) *poolRuntime {
-	if rt == nil {
-		return nil
-	}
-	clone := *rt
-	if rt.sqrtPrice != nil {
-		clone.sqrtPrice = new(big.Int).Set(rt.sqrtPrice)
-	}
-	return &clone
-}
-
-func weiToEther(gasPrice *big.Int, gasUsed uint64) float64 {
-	if gasPrice == nil || gasUsed == 0 {
-		return 0
-	}
-	wei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasUsed))
-	fWei, _ := new(big.Float).SetInt(wei).Float64()
-	return fWei / 1e18
 }

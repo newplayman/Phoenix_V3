@@ -14,12 +14,12 @@ import (
 type RedisStream struct {
 	client *redis.Client
 
-	prefix string
-	group  string
-	block  time.Duration
-	acksRequired   bool
+	prefix          string
+	group           string
+	block           time.Duration
+	acksRequired    bool
 	replayRetention time.Duration
-	trimMu         struct {
+	trimMu          struct {
 		last map[Topic]time.Time
 	}
 }
@@ -70,10 +70,10 @@ func NewRedisStream(redisURL, prefix, group string, options ...RedisOption) (*Re
 	}
 
 	rs := &RedisStream{
-		client: client,
-		prefix: prefix,
-		group:  group,
-		block:  5 * time.Second,
+		client:       client,
+		prefix:       prefix,
+		group:        group,
+		block:        5 * time.Second,
 		acksRequired: true,
 	}
 	rs.trimMu.last = make(map[Topic]time.Time)

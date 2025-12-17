@@ -24,4 +24,3 @@ func (g *DryRunGateway) Send(ctx context.Context, intent strategy.Intent) (*TxRe
 	_ = intent
 	return &TxResult{Hash: common.Hash{}, Status: StatusSigned}, nil
 }
-

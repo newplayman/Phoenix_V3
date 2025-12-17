@@ -17,17 +17,17 @@ const (
 )
 
 type Intent struct {
-	ID              string
-	Type            IntentType
-	PoolID          string
-	ChainID         int64
-	Urgency         int
-	Deadline        time.Time
-	ExpectedPnL     float64
+	ID                string
+	Type              IntentType
+	PoolID            string
+	ChainID           int64
+	Urgency           int
+	Deadline          time.Time
+	ExpectedPnL       float64
 	TargetNotionalPct float64 // Percentage of total equity to deploy (0.0 - 1.0)
-	StrategyVersion string
-	RiskMode        string
-	Metadata        map[string]string
+	StrategyVersion   string
+	RiskMode          string
+	Metadata          map[string]string
 }
 
 type Strategy interface {
