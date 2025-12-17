@@ -19,6 +19,7 @@ Target network (default): **Arbitrum Sepolia** (`chainId=421614`).
 - `docs/runbook/prelive_signoff.md`
 - `docs/runbook/definition_of_done.md`
 - `docs/runbook/orderbook_replay.md`
+- `docs/runbook/final_acceptance_report.md`
 
 ## Market Data
 
