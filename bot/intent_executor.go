@@ -574,31 +574,82 @@ func (e *IntentExecutor) executeIntent(ctx context.Context, intent strategy.Inte
 			amt1 := parseAmt("amount1")
 			t0 := common.HexToAddress(intent.Metadata["token0"])
 			t1 := common.HexToAddress(intent.Metadata["token1"])
-			if amt0.Sign() > 0 {
-				if err := ethGw.EnsureAllowance(ctx, t0, pmAddr, amt0); err != nil {
-					status = "failed"
-					e.deps.Risk.RecordFailure()
-					if mintStepIdx >= 0 {
-						RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": "approve token0 failed", "detail": err.Error()})
-					}
-					if tracked {
-						UpsertIntentStatus(stepStore, intent, "failed")
-					}
-					return
+			approveStep := func(token common.Address, amount *big.Int, label string) error {
+				if amount == nil || amount.Sign() <= 0 {
+					return nil
 				}
+				if !tracked {
+					return ethGw.EnsureAllowance(ctx, token, pmAddr, amount)
+				}
+				idx := stepIndex
+				stepIndex++
+				RecordStepPending(ctx, stepStore, stepStream, intent.ID, idx, "approve", map[string]interface{}{
+					"token":   token.Hex(),
+					"spender": pmAddr.Hex(),
+					"amount":  amount.String(),
+					"label":   label,
+				})
+				txh, receipt, err := ethGw.EnsureAllowanceTx(ctx, token, pmAddr, amount)
+				if err != nil {
+					RecordStepFinal(ctx, stepStore, stepStream, intent.ID, idx, "approve", "failed", txh.Hex(), map[string]interface{}{
+						"token":   token.Hex(),
+						"spender": pmAddr.Hex(),
+						"amount":  amount.String(),
+						"label":   label,
+						"error":   err.Error(),
+					})
+					return err
+				}
+				if txh == (common.Hash{}) {
+					RecordStepFinal(ctx, stepStore, stepStream, intent.ID, idx, "approve", "skipped", "", map[string]interface{}{
+						"token":   token.Hex(),
+						"spender": pmAddr.Hex(),
+						"amount":  amount.String(),
+						"label":   label,
+					})
+					return nil
+				}
+				stepStatus := "sent"
+				if receipt != nil {
+					if receipt.Status == 1 {
+						stepStatus = "mined"
+					} else {
+						stepStatus = "failed"
+					}
+				}
+				RecordStepFinal(ctx, stepStore, stepStream, intent.ID, idx, "approve", stepStatus, txh.Hex(), map[string]interface{}{
+					"token":   token.Hex(),
+					"spender": pmAddr.Hex(),
+					"amount":  amount.String(),
+					"label":   label,
+				})
+				if receipt != nil && receipt.Status != 1 {
+					return fmt.Errorf("approve %s failed (tx=%s)", label, txh.Hex())
+				}
+				return nil
 			}
-			if amt1.Sign() > 0 {
-				if err := ethGw.EnsureAllowance(ctx, t1, pmAddr, amt1); err != nil {
-					status = "failed"
-					e.deps.Risk.RecordFailure()
-					if mintStepIdx >= 0 {
-						RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": "approve token1 failed", "detail": err.Error()})
-					}
-					if tracked {
-						UpsertIntentStatus(stepStore, intent, "failed")
-					}
-					return
+
+			if err := approveStep(t0, amt0, "token0"); err != nil {
+				status = "failed"
+				e.deps.Risk.RecordFailure()
+				if mintStepIdx >= 0 {
+					RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": "approve token0 failed", "detail": err.Error()})
 				}
+				if tracked {
+					UpsertIntentStatus(stepStore, intent, "failed")
+				}
+				return
+			}
+			if err := approveStep(t1, amt1, "token1"); err != nil {
+				status = "failed"
+				e.deps.Risk.RecordFailure()
+				if mintStepIdx >= 0 {
+					RecordStepFinal(ctx, stepStore, stepStream, intent.ID, mintStepIdx, "mint", "failed", "", map[string]interface{}{"error": "approve token1 failed", "detail": err.Error()})
+				}
+				if tracked {
+					UpsertIntentStatus(stepStore, intent, "failed")
+				}
+				return
 			}
 
 			data, err := localAdapter.BuildMintData(intent)

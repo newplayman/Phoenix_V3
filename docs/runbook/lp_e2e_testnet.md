@@ -10,7 +10,7 @@
 1) **Mock-LP（推荐 / 可复现）**：部署一套“最小可用 mock”合约（ERC20 + Mock PositionManager + Mock Pool），用 Phoenix 的同一套 calldata/审批/审计链路跑通 `approve → mint`。
    - 目的：验证 Phoenix 的“交易构建/nonce/重试/审计/回执记录”闭环，而不依赖真实 Uniswap V3 Periphery 在 testnet 的部署情况。
    - 注意：这不是 Uniswap V3 的真实 LP，链上数据仅用于 Phoenix plumbing 验证。
-   - 说明：当前 Phoenix 会在发送 `mint` 之前自动做 ERC20 `approve`（若需要）；这些 `approve` 交易可能不会出现在 intent steps 里，但会在链上可见。
+   - 说明：Phoenix 会在发送 `mint` 之前自动做 ERC20 `approve`（若需要）；`approve` 会作为 intent steps 记录（`step_type=approve`，status=skipped/sent/mined/failed）。
 
 2) **Real UniV3（可选）**：如果你提供 Arbitrum Sepolia 上真实可用的 `NonfungiblePositionManager` + pool + tokens 地址，并且 `scripts/check_contract_code.sh` 证明有代码，才执行真实 LP 交易。
 

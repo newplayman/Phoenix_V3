@@ -212,30 +212,31 @@ func (g *EthGateway) BalanceOfERC20(ctx context.Context, token common.Address) (
 	return bal, nil
 }
 
-// EnsureAllowance checks if spender has enough allowance, otherwise sends Approve tx
-func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.Address, amount *big.Int) error {
+// EnsureAllowanceTx checks if spender has enough allowance, otherwise sends an Approve tx.
+// Returns (txHash, minedReceipt, err). If allowance is already sufficient, returns zero hash and nil receipt.
+func (g *EthGateway) EnsureAllowanceTx(ctx context.Context, token, spender common.Address, amount *big.Int) (common.Hash, *types.Receipt, error) {
 	// 1. Check Allowance
 	allowanceData, err := erc20ABI.Pack("allowance", g.wallet.Address, spender)
 	if err != nil {
-		return fmt.Errorf("pack allowance failed: %w", err)
+		return common.Hash{}, nil, fmt.Errorf("pack allowance failed: %w", err)
 	}
 	call := ethereum.CallMsg{To: &token, Data: allowanceData}
 	res, err := g.client.CallContract(ctx, call, nil)
 	if err != nil {
-		return fmt.Errorf("call allowance failed: %w", err)
+		return common.Hash{}, nil, fmt.Errorf("call allowance failed: %w", err)
 	}
 	values, err := erc20ABI.Unpack("allowance", res)
 	if err != nil || len(values) == 0 {
-		return fmt.Errorf("unpack allowance failed: %w", err)
+		return common.Hash{}, nil, fmt.Errorf("unpack allowance failed: %w", err)
 	}
 	currentAllowance, ok := values[0].(*big.Int)
 	if !ok {
-		return fmt.Errorf("unexpected allowance type %T", values[0])
+		return common.Hash{}, nil, fmt.Errorf("unexpected allowance type %T", values[0])
 	}
 	log.Printf("[Gateway Debug] Checked Allowance: Token=%s Spender=%s Amt=%s Current=%s", token.Hex(), spender.Hex(), amount.String(), currentAllowance.String())
 
 	if currentAllowance.Cmp(amount) >= 0 {
-		return nil // Already sufficient
+		return common.Hash{}, nil, nil // Already sufficient
 	}
 
 	log.Printf("[Gateway] Approving %s for %s", token.Hex(), spender.Hex())
@@ -253,7 +254,7 @@ func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.
 
 	approveData, err := erc20ABI.Pack("approve", spender, approveAmt)
 	if err != nil {
-		return fmt.Errorf("pack approve failed: %w", err)
+		return common.Hash{}, nil, fmt.Errorf("pack approve failed: %w", err)
 	}
 
 	approveCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -288,7 +289,7 @@ func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.
 		tx := types.NewTransaction(nonce, token, big.NewInt(0), 100000, adjPrice, approveData)
 		signedTx, err := types.SignTx(tx, types.NewEIP155Signer(g.chainID), g.wallet.PrivateKey)
 		if err != nil {
-			return err
+			return common.Hash{}, nil, err
 		}
 
 		if err := g.client.SendTransaction(approveCtx, signedTx); err != nil {
@@ -305,7 +306,7 @@ func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.
 			backoff := time.Duration(g.retryBackoffMs*(attempt+1)) * time.Millisecond
 			select {
 			case <-approveCtx.Done():
-				return fmt.Errorf("approve tx context done: %w", lastErr)
+				return common.Hash{}, nil, fmt.Errorf("approve tx context done: %w", lastErr)
 			case <-time.After(backoff):
 			}
 			continue
@@ -325,7 +326,7 @@ func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.
 			if err == nil && receipt != nil {
 				mineCancel()
 				go g.waitReceipt(lastHash)
-				return nil
+				return lastHash, receipt, nil
 			}
 			select {
 			case <-mineWait.Done():
@@ -337,9 +338,16 @@ func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.
 		// Not mined yet; retry with a replacement tx using same nonce and higher gas.
 	}
 	if lastHash != (common.Hash{}) {
-		return fmt.Errorf("approve tx not mined: %s", lastHash.Hex())
+		return lastHash, nil, fmt.Errorf("approve tx not mined: %s", lastHash.Hex())
 	}
-	return fmt.Errorf("approve tx failed: %w", lastErr)
+	return common.Hash{}, nil, fmt.Errorf("approve tx failed: %w", lastErr)
+}
+
+// EnsureAllowance checks if spender has enough allowance, otherwise sends Approve tx.
+// It is kept for backward compatibility; prefer EnsureAllowanceTx when you need the tx hash/receipt.
+func (g *EthGateway) EnsureAllowance(ctx context.Context, token, spender common.Address, amount *big.Int) error {
+	_, _, err := g.EnsureAllowanceTx(ctx, token, spender, amount)
+	return err
 }
 
 func (g *EthGateway) Send(ctx context.Context, intent strategy.Intent) (*TxResult, error) {

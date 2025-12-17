@@ -73,3 +73,12 @@ This is a testnet-only plumbing verification using mock contracts (not real UniV
   - from: 0x39BFa37b4A8A7A20D0F69fd0a388e3EAe739c217
   - tx_hash: 0x84be128a9a79684c23182f0d9e29d8f0ee924edd7664c6e643af546175de9c22
   - explorer: https://sepolia.arbiscan.io/tx/0x84be128a9a79684c23182f0d9e29d8f0ee924edd7664c6e643af546175de9c22
+
+- timestamp_utc: 2025-12-17T09:05:43Z
+  - from: 0x39BFa37b4A8A7A20D0F69fd0a388e3EAe739c217
+  - approve_token0_tx: 0x7417ff32a095ee329596d580b5b7f316bfb0cd5ee9758719c58f90dd5dbb93a8
+  - approve_token1_tx: 0x8a3dd2e1c7b2056d127a3fc9508d888ba150d23fc1149c5e8c4338e4b3995671
+  - mint_tx: 0xebb1d7ab4567638897061e0410cb05d1bc4feda069116768e0e2d3664b3b6d3c
+  - approve_token0_explorer: https://sepolia.arbiscan.io/tx/0x7417ff32a095ee329596d580b5b7f316bfb0cd5ee9758719c58f90dd5dbb93a8
+  - approve_token1_explorer: https://sepolia.arbiscan.io/tx/0x8a3dd2e1c7b2056d127a3fc9508d888ba150d23fc1149c5e8c4338e4b3995671
+  - mint_explorer: https://sepolia.arbiscan.io/tx/0xebb1d7ab4567638897061e0410cb05d1bc4feda069116768e0e2d3664b3b6d3c
