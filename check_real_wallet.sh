@@ -1,4 +1,8 @@
 #!/bin/bash
+if [[ "${PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE:-}" != "1" ]]; then
+  echo "blocked: this script targets Arbitrum One; set PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE=1 to run" >&2
+  exit 2
+fi
 WALLET="0x4edc10cc33a324459470cce3a9cd7b0b879e228f"
 WETH="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 USDC="0xaf88d065e77c8cC2239327C5EDb3A432268e5831"

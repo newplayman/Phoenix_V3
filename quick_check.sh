@@ -1,4 +1,8 @@
 #!/bin/bash
+if [[ "${PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE:-}" != "1" ]]; then
+  echo "blocked: this script targets Arbitrum One; set PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE=1 to run" >&2
+  exit 2
+fi
 echo "正在查询钱包余额..."
 echo ""
 

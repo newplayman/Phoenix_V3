@@ -1,4 +1,8 @@
 #!/bin/bash
+if [[ "${PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE:-}" != "1" ]]; then
+  echo "blocked: this script targets Arbitrum One; set PHOENIX_UNSAFE_ALLOW_ARBITRUM_ONE=1 to run" >&2
+  exit 2
+fi
 TX="0x9d9c6707e629e935536f800206152425e022e5a0792d4fcb2c92e8c9c68e117b"
 RPC="https://arb1.arbitrum.io/rpc"
 

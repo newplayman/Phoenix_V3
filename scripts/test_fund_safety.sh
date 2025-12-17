@@ -26,11 +26,12 @@ NC='\033[0m' # No Color
 
 # Configuration
 CONFIG_PATH="${CONFIG_PATH:-configs/config.yaml}"
-WALLET_ADDR="0x39BFa37b4A8A7A20D0F69fd0a388e3EAe739c217"
-TUSD_ADDR="0x3E49DB88bC85135b6F716E5CD573cDd42b8640c5"
-WETH_ADDR="0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9"
-POOL_ADDR="0x1E80b0b6d12Ecf2CDD08bC9c66f2fD594394331d"
-POS_MANAGER="0x1238536071E1c677A632429e3655c799b22cDA52"
+SEPOLIA_RPC_URL="${SEPOLIA_RPC_URL:-https://ethereum-sepolia.publicnode.com}"
+WALLET_ADDR="${WALLET_ADDR:-0x39BFa37b4A8A7A20D0F69fd0a388e3EAe739c217}"
+TUSD_ADDR="${TUSD_ADDR:-0x3E49DB88bC85135b6F716E5CD573cDd42b8640c5}"
+WETH_ADDR="${WETH_ADDR:-0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9}"
+POOL_ADDR="${POOL_ADDR:-0x1E80b0b6d12Ecf2CDD08bC9c66f2fD594394331d}"
+POS_MANAGER="${POS_MANAGER:-0x1238536071E1c677A632429e3655c799b22cDA52}"
 LOG_DIR="logs"
 TEST_LOG="$LOG_DIR/fund_safety_test.log"
 
@@ -72,7 +73,7 @@ import (
     "github.com/ethereum/go-ethereum/ethclient"
 )
 func main() {
-    client, _ := ethclient.Dial("https://sepolia.infura.io/v3/a2da59657d274efcae256bbe5616dd64")
+    client, _ := ethclient.Dial("$SEPOLIA_RPC_URL")
     tokenAddr := common.HexToAddress("$token_addr")
     walletAddr := common.HexToAddress("$WALLET_ADDR")
     
@@ -120,7 +121,7 @@ import (
     "github.com/ethereum/go-ethereum/ethclient"
 )
 func main() {
-    client, _ := ethclient.Dial("https://sepolia.infura.io/v3/a2da59657d274efcae256bbe5616dd64")
+    client, _ := ethclient.Dial("$SEPOLIA_RPC_URL")
     tokenAddr := common.HexToAddress("$token_addr")
     contractAddr := common.HexToAddress("$contract_addr")
     
@@ -202,7 +203,7 @@ record_initial_balances() {
     log "初始 WETH: $INITIAL_WETH"
     
     log "检查 ETH 余额..."
-    INITIAL_ETH=$(cast balance $WALLET_ADDR --rpc-url https://sepolia.infura.io/v3/a2da59657d274efcae256bbe5616dd64 2>/dev/null || echo "0")
+    INITIAL_ETH=$(cast balance $WALLET_ADDR --rpc-url "$SEPOLIA_RPC_URL" 2>/dev/null || echo "0")
     log "初始 ETH: $INITIAL_ETH"
     
     echo ""
