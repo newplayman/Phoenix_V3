@@ -64,6 +64,12 @@ func main() {
 		cfgValue.Store(cfg)
 		log.Printf("[Safety] PHOENIX_FORCE_DRY_RUN=1 -> strategy.dry_run=true")
 	}
+	// Safety: when auto-eval is enabled, keep dry-run unless explicitly allowed.
+	if os.Getenv("PHOENIX_AUTO_EVAL") == "1" && os.Getenv("PHOENIX_ALLOW_LIVE") != "1" && !cfg.Strategy.DryRun {
+		cfg.Strategy.DryRun = true
+		cfgValue.Store(cfg)
+		log.Printf("[Safety] PHOENIX_AUTO_EVAL=1 -> forcing dry_run=true (set PHOENIX_ALLOW_LIVE=1 to override)")
+	}
 
 	// 2. Initialize Monitor
 	monitorService := monitor.NewMonitor(cfg.Monitoring)
@@ -149,6 +155,7 @@ func main() {
 	// 6. Initialize Strategy & Queue
 	strategyCfg := buildStrategyConfig(cfg)
 	strat := strategy.NewBasicStrategy(strategyCfg)
+	mockStrat := strategy.NewMockRebalanceStrategyFromEnv()
 	intentQueue := strategy.NewIntentQueue()
 
 	// 7. Initialize Storage (Phase 5)
@@ -234,11 +241,21 @@ func main() {
 		}
 	}()
 
-	queryTicker := time.NewTicker(5 * time.Second)
+	decisionIntervalSec := 5
+	if v := strings.TrimSpace(os.Getenv("DECISION_INTERVAL_SEC")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			decisionIntervalSec = n
+		}
+	}
+	queryTicker := time.NewTicker(time.Duration(decisionIntervalSec) * time.Second)
 	defer queryTicker.Stop()
-	manualOnly := os.Getenv("PHOENIX_MANUAL_ONLY") == "1"
+
 	lastDecisionBlocked := false
 	lastDecisionReason := ""
+	lastDecisionRiskMode := ""
+	var lastEvalAt time.Time
+	lastEvalAction := ""
+	lastEvalReason := ""
 
 	// Mock position
 	currentPos := engine.CurrentPosition{LowerTick: 200000, UpperTick: 202000, Liquidity: 1000}
@@ -280,36 +297,106 @@ func main() {
 			}
 
 		case <-queryTicker.C:
-			enabled := !manualOnly
-			blocked, blockReason, age, _ := priceAgg.GetGate(time.Now())
+			manualOnly := os.Getenv("PHOENIX_MANUAL_ONLY") == "1"
+			autoEvalEnabled := os.Getenv("PHOENIX_AUTO_EVAL") == "1" && !manualOnly
 
-			if (!enabled) || blocked {
-				if blocked != lastDecisionBlocked || blockReason != lastDecisionReason {
-					lastDecisionBlocked = blocked
+			// Gate is driven by market risk.mode (not only stale/freeze age).
+			snap := priceAgg.Snapshot()
+			riskMode := strings.ToLower(strings.TrimSpace(snap.Risk.Mode))
+			gateReason := strings.TrimSpace(snap.Risk.Reason)
+			staleAgeMs := snap.Aggregate.StaleAgeMs
+
+			decisionBlocked := manualOnly || riskMode != "normal"
+			blockReason := ""
+			if manualOnly {
+				blockReason = "manual_only"
+			} else if riskMode != "normal" {
+				blockReason = gateReason
+			}
+
+			// Keep /api/status decision fields up-to-date even when auto-eval is disabled.
+			apiServer.UpdateDecision(api.DecisionStatus{
+				LastEvalAt:     lastEvalAt,
+				LastEvalAction: lastEvalAction,
+				LastEvalReason: lastEvalReason,
+			})
+
+			if decisionBlocked {
+				// Log on transitions or when auto-eval would have executed.
+				if decisionBlocked != lastDecisionBlocked || blockReason != lastDecisionReason || riskMode != lastDecisionRiskMode || autoEvalEnabled {
+					lastDecisionBlocked = decisionBlocked
 					lastDecisionReason = blockReason
-					if !enabled {
-						log.Printf("[Decision] blocked reason=manual_only")
-					} else {
-						log.Printf("[Decision] blocked reason=%s age_ms=%d", blockReason, age.Milliseconds())
+					lastDecisionRiskMode = riskMode
+					log.Printf("[Decision] blocked reason=%s risk_mode=%s stale_age_ms=%d", blockReason, riskMode, staleAgeMs)
+				}
+				lastEvalAt = time.Now()
+				lastEvalAction = "blocked"
+				lastEvalReason = blockReason
+				apiServer.UpdateDecision(api.DecisionStatus{
+					LastEvalAt:     lastEvalAt,
+					LastEvalAction: lastEvalAction,
+					LastEvalReason: lastEvalReason,
+				})
+				continue
+			}
+
+			// If auto-eval is disabled, don't generate intents.
+			if !autoEvalEnabled {
+				continue
+			}
+
+			// Evaluate strategy (mock by default for auto-eval).
+			strategyKind := strings.ToLower(strings.TrimSpace(os.Getenv("PHOENIX_STRATEGY_KIND")))
+			if strategyKind == "" {
+				strategyKind = "mock"
+			}
+
+			var intents []contracts.Intent
+			action := "noop"
+			reason := "noop"
+
+			switch strategyKind {
+			case "basic":
+				input := engine.EngineInput{
+					CexPrice:   snap.Aggregate.AggPrice,
+					DexPrice:   currentDexPrice,
+					Volatility: 0.02,
+					Position:   currentPos,
+					Params:     engine.StrategyParams{RiskFactor: 1.0},
+				}
+				out, err := strat.Evaluate(context.Background(), input)
+				if err != nil {
+					log.Printf("[Strategy] eval error=%v", err)
+					action = "noop"
+					reason = "error"
+				} else {
+					intents = out
+					if len(out) > 0 {
+						action = string(out[0].Type)
+						reason = "generated"
 					}
 				}
-				continue
-			}
-			// 1. Strategy Step
-			input := engine.EngineInput{
-				CexPrice:   currentPrice,
-				DexPrice:   currentDexPrice,
-				Volatility: 0.02,
-				Position:   currentPos,
-				Params:     engine.StrategyParams{RiskFactor: 1.0},
-			}
-			intents, err := strat.Evaluate(context.Background(), input)
-			if err != nil {
-				log.Printf("Strategy Error: %v", err)
-				continue
+			default:
+				action, reason, intents = mockStrat.EvaluateMock(strategy.MockRebalanceInput{
+					AggPrice:      snap.Aggregate.AggPrice,
+					DivergencePct: snap.Aggregate.DivergencePct,
+					RiskMode:      snap.Risk.Mode,
+					RiskReason:    snap.Risk.Reason,
+					StaleAgeMs:    snap.Aggregate.StaleAgeMs,
+				})
 			}
 
-			// 2. Queue Step，由 Intent Executor 统一调度
+			lastEvalAt = time.Now()
+			lastEvalAction = action
+			lastEvalReason = reason
+			apiServer.UpdateDecision(api.DecisionStatus{
+				LastEvalAt:     lastEvalAt,
+				LastEvalAction: lastEvalAction,
+				LastEvalReason: lastEvalReason,
+			})
+
+			log.Printf("[Strategy] eval action=%s reason=%s intents=%d agg_price=%.6f div_pct=%.6f", action, reason, len(intents), snap.Aggregate.AggPrice, snap.Aggregate.DivergencePct)
+
 			for _, i := range intents {
 				intentQueue.Enqueue(i)
 			}
@@ -856,9 +943,10 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 		intent.Metadata = make(map[string]string)
 	}
 	if market != nil {
-		r := market.GetRisk()
-		if strings.ToLower(strings.TrimSpace(r.Mode)) == "frozen" {
-			log.Printf("[MarketGate] reject intent %s reason=price_frozen", intent.ID)
+		snap := market.Snapshot()
+		riskMode := strings.ToLower(strings.TrimSpace(snap.Risk.Mode))
+		if riskMode != "normal" {
+			log.Printf("[Decision] blocked reason=%s risk_mode=%s stale_age_ms=%d", snap.Risk.Reason, riskMode, snap.Aggregate.StaleAgeMs)
 			return
 		}
 	}
@@ -875,6 +963,10 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 
 	currentCfg := cfgValue.Load().(*config.AppConfig)
 	isDryRun := currentCfg.Strategy.DryRun
+	if intent.Type == contracts.IntentMockRebalance {
+		// This intent is intentionally non-broadcasting.
+		isDryRun = true
+	}
 	log.Printf("[IntentExecutor] executing %s dry_run=%v", intent.ID, isDryRun)
 
 	var txHash string

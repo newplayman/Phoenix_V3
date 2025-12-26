@@ -69,10 +69,11 @@ type Engine interface {
 type IntentType string
 
 const (
-	IntentRebalance  IntentType = "rebalance"
-	IntentWithdraw   IntentType = "withdraw"
-	IntentCollectFee IntentType = "collect_fee"
-	IntentSwap       IntentType = "swap"
+	IntentRebalance     IntentType = "rebalance"
+	IntentWithdraw      IntentType = "withdraw"
+	IntentCollectFee    IntentType = "collect_fee"
+	IntentSwap          IntentType = "swap"
+	IntentMockRebalance IntentType = "mock_rebalance"
 )
 
 type Intent struct {

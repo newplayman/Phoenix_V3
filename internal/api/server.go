@@ -39,9 +39,20 @@ type SystemStatus struct {
 }
 
 type DecisionStatus struct {
-	Enabled     bool   `json:"enabled"`
-	Blocked     bool   `json:"blocked"`
-	BlockReason string `json:"block_reason"`
+	Enabled         bool       `json:"enabled"`
+	Blocked         bool       `json:"blocked"`
+	BlockReason     string     `json:"block_reason"`
+	AutoEvalEnabled bool       `json:"auto_eval_enabled"`
+	LastEvalAt      time.Time  `json:"last_eval_at"`
+	LastEvalAction  string     `json:"last_eval_action"` // noop|mock_rebalance|blocked|...
+	LastEvalReason  string     `json:"last_eval_reason"`
+	LastGate        GateStatus `json:"last_gate"`
+}
+
+type GateStatus struct {
+	RiskMode   string `json:"risk_mode"`
+	Reason     string `json:"reason"`
+	StaleAgeMs int64  `json:"stale_age_ms"`
 }
 
 type PnLSnapshot struct {
@@ -192,15 +203,40 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) currentDecision() DecisionStatus {
+	s.decisionMu.RLock()
+	out := s.decision
+	s.decisionMu.RUnlock()
+
 	enabled := os.Getenv("PHOENIX_MANUAL_ONLY") != "1"
+	out.Enabled = enabled
+	out.AutoEvalEnabled = os.Getenv("PHOENIX_AUTO_EVAL") == "1" && enabled
+
 	if !enabled {
-		return DecisionStatus{Enabled: false, Blocked: true, BlockReason: "manual_only"}
+		out.Blocked = true
+		out.BlockReason = "manual_only"
+		return out
 	}
 	if s.market == nil {
-		return DecisionStatus{Enabled: true, Blocked: false, BlockReason: ""}
+		out.Blocked = false
+		out.BlockReason = ""
+		return out
 	}
-	blocked, reason, _, _ := s.market.GetGate(time.Now())
-	return DecisionStatus{Enabled: true, Blocked: blocked, BlockReason: reason}
+
+	snap := s.market.Snapshot()
+	out.LastGate = GateStatus{
+		RiskMode:   snap.Risk.Mode,
+		Reason:     snap.Risk.Reason,
+		StaleAgeMs: snap.Aggregate.StaleAgeMs,
+	}
+	if strings.ToLower(strings.TrimSpace(snap.Risk.Mode)) != "normal" {
+		out.Blocked = true
+		out.BlockReason = snap.Risk.Reason
+		return out
+	}
+
+	out.Blocked = false
+	out.BlockReason = ""
+	return out
 }
 
 func (s *Server) handleIntents(w http.ResponseWriter, r *http.Request) {
