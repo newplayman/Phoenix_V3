@@ -24,6 +24,7 @@ type PriceSourceState struct {
 	LastUpdateAt time.Time `json:"last_update_at"`
 	Fresh        bool      `json:"fresh"`
 	UpdateAgeMs  int64     `json:"update_age_ms"`
+	NeverUpdated bool      `json:"never_updated"`
 	LatencyMs    int64     `json:"latency_ms"`
 	Err1m        int       `json:"err_1m"`
 	LastErr      string    `json:"last_err"`

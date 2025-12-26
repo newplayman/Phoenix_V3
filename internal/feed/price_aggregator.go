@@ -115,6 +115,8 @@ func (a *PriceAggregator) Snapshot() MarketSnapshot {
 	outSources := make([]PriceSourceState, 0, len(a.sources))
 	for _, st := range a.sources {
 		s := st.PriceSourceState
+		s.NeverUpdated = s.LastUpdateAt.IsZero() || s.LastPrice <= 0
+
 		age := time.Duration(0)
 		if !s.LastUpdateAt.IsZero() {
 			age = now.Sub(s.LastUpdateAt)
@@ -122,8 +124,13 @@ func (a *PriceAggregator) Snapshot() MarketSnapshot {
 				age = 0
 			}
 		}
-		s.UpdateAgeMs = durationMs(age)
-		s.Fresh = !s.LastUpdateAt.IsZero() && s.LastPrice > 0 && age <= a.cfg.StaleWindow
+
+		if s.NeverUpdated {
+			s.UpdateAgeMs = -1
+		} else {
+			s.UpdateAgeMs = durationMs(age)
+		}
+		s.Fresh = !s.NeverUpdated && age <= a.cfg.StaleWindow
 		outSources = append(outSources, s)
 	}
 	sort.Slice(outSources, func(i, j int) bool { return outSources[i].Name < outSources[j].Name })
@@ -264,16 +271,21 @@ func (a *PriceAggregator) recomputeLocked(now time.Time) (aggUpdated bool) {
 	}
 	var freshes []fresh
 	var connectedStale []string
+	var connectedNeverUpdated []string
 	for _, st := range a.sources {
+		neverUpdated := st.LastUpdateAt.IsZero() || st.LastPrice <= 0
 		age := now.Sub(st.LastUpdateAt)
-		isFresh := !st.LastUpdateAt.IsZero() && st.LastPrice > 0 && age <= a.cfg.StaleWindow
+		isFresh := !neverUpdated && age <= a.cfg.StaleWindow
 		if isFresh {
 			freshes = append(freshes, fresh{name: st.Name, p: st.LastPrice, t: st.LastUpdateAt})
-		} else if st.Connected && !st.LastUpdateAt.IsZero() && st.LastPrice > 0 && age > a.cfg.StaleWindow {
+		} else if st.Connected && neverUpdated {
+			connectedNeverUpdated = append(connectedNeverUpdated, st.Name)
+		} else if st.Connected && !neverUpdated && age > a.cfg.StaleWindow {
 			connectedStale = append(connectedStale, st.Name)
 		}
 	}
 	sort.Strings(connectedStale)
+	sort.Strings(connectedNeverUpdated)
 
 	prevUpdatedAt := a.agg.AggUpdatedAt
 	prevPrice := a.agg.AggPrice
@@ -313,6 +325,8 @@ func (a *PriceAggregator) recomputeLocked(now time.Time) (aggUpdated bool) {
 		mode = "degraded"
 		if len(connectedStale) > 0 {
 			reason = "one_source_stale:" + connectedStale[0]
+		} else if len(connectedNeverUpdated) > 0 {
+			reason = "one_source_missing:" + connectedNeverUpdated[0]
 		} else {
 			reason = "single_source"
 		}
