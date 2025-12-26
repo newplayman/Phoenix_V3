@@ -6,9 +6,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API_PORT="${API_PORT:-18081}"
 PHOENIX_CONFIG="${PHOENIX_CONFIG:-$ROOT_DIR/configs/config.yaml}"
 
-PID_FILE="${PID_FILE:-$ROOT_DIR/.auto_strategy.pid}"
-LOG_FILE="${LOG_FILE:-$ROOT_DIR/.auto_strategy.log}"
-BIN_FILE="${BIN_FILE:-$ROOT_DIR/.auto_strategy.bot}"
+mkdir -p "$ROOT_DIR/tmp" >/dev/null 2>&1 || true
+
+PID_FILE="${PID_FILE:-$ROOT_DIR/tmp/auto_strategy.pid}"
+LOG_FILE="${LOG_FILE:-$ROOT_DIR/tmp/auto_strategy.log}"
+BIN_FILE="${BIN_FILE:-$ROOT_DIR/tmp/auto_strategy.bot}"
 
 STOP="${STOP:-0}"
 if [[ "$STOP" == "1" ]]; then
@@ -54,4 +56,3 @@ echo "[run] pid=$PID (PID_FILE=$PID_FILE)"
 echo "[run] log=$LOG_FILE"
 echo "[run] status: curl -s http://127.0.0.1:${API_PORT}/api/status | jq '.decision'"
 echo "[run] stop: STOP=1 PID_FILE=$PID_FILE bash scripts/run_auto_strategy_dry.sh"
-
