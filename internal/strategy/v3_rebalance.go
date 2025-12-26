@@ -23,6 +23,11 @@ type V3RebalanceConfig struct {
 
 	AssumedLowerTick int64
 	AssumedUpperTick int64
+	HasAssumedRange  bool
+
+	NPMAddress      string
+	PositionTokenID uint64
+	ChainRPCURL     string
 }
 
 func defaultV3RebalanceConfig() V3RebalanceConfig {
@@ -35,6 +40,10 @@ func defaultV3RebalanceConfig() V3RebalanceConfig {
 		TickSpacing:      60,
 		AssumedLowerTick: 0,
 		AssumedUpperTick: 0,
+		HasAssumedRange:  false,
+		NPMAddress:       "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+		PositionTokenID:  0,
+		ChainRPCURL:      "",
 	}
 }
 
@@ -63,9 +72,23 @@ func LoadV3RebalanceConfig(cfg *config.AppConfig) V3RebalanceConfig {
 		}
 		if v, ok := getParamInt64(cfg.Strategy.Params, "STRAT_V3_ASSUMED_LOWER_TICK"); ok {
 			out.AssumedLowerTick = v
+			out.HasAssumedRange = true
 		}
 		if v, ok := getParamInt64(cfg.Strategy.Params, "STRAT_V3_ASSUMED_UPPER_TICK"); ok {
 			out.AssumedUpperTick = v
+			out.HasAssumedRange = true
+		}
+		if v, ok := getParamInt(cfg.Strategy.Params, "STRAT_V3_POSITION_TOKEN_ID"); ok && v > 0 {
+			out.PositionTokenID = uint64(v)
+		}
+		if v, ok := getParamInt64(cfg.Strategy.Params, "STRAT_V3_POSITION_TOKEN_ID"); ok && v > 0 {
+			out.PositionTokenID = uint64(v)
+		}
+		if v, ok := getParamString(cfg.Strategy.Params, "STRAT_V3_NPM_ADDRESS"); ok && v != "" {
+			out.NPMAddress = v
+		}
+		if v, ok := getParamString(cfg.Strategy.Params, "STRAT_V3_CHAIN_RPC_URL"); ok && v != "" {
+			out.ChainRPCURL = v
 		}
 	}
 
@@ -95,12 +118,30 @@ func LoadV3RebalanceConfig(cfg *config.AppConfig) V3RebalanceConfig {
 	if v := strings.TrimSpace(os.Getenv("STRAT_V3_ASSUMED_LOWER_TICK")); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			out.AssumedLowerTick = n
+			out.HasAssumedRange = true
 		}
 	}
 	if v := strings.TrimSpace(os.Getenv("STRAT_V3_ASSUMED_UPPER_TICK")); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			out.AssumedUpperTick = n
+			out.HasAssumedRange = true
 		}
+	}
+	if v := strings.TrimSpace(os.Getenv("STRAT_V3_NPM_ADDRESS")); v != "" {
+		out.NPMAddress = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STRAT_V3_POSITION_TOKEN_ID")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			out.PositionTokenID = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("STRAT_V3_CHAIN_RPC_URL")); v != "" {
+		out.ChainRPCURL = v
+	}
+
+	// Fall back to config chain RPC if provided.
+	if out.ChainRPCURL == "" && cfg != nil && len(cfg.Chains) > 0 {
+		out.ChainRPCURL = cfg.Chains[0].RPC
 	}
 
 	if out.TickSpacing <= 0 {
@@ -177,15 +218,26 @@ func (s *V3RebalanceStrategy) EvaluateAt(cfg V3RebalanceConfig, now time.Time, i
 	currentTick := in.PoolTick
 	curLower := in.CurrentLowerTick
 	curUpper := in.CurrentUpperTick
-	if curLower == 0 && curUpper == 0 && cfg.AssumedLowerTick != 0 && cfg.AssumedUpperTick != 0 {
-		curLower = cfg.AssumedLowerTick
-		curUpper = cfg.AssumedUpperTick
-	}
-	// If still unknown, assume centered around current tick.
+
 	if curLower == 0 && curUpper == 0 {
-		half := cfg.WidthTicks / 2
-		curLower = alignDownToSpacing(currentTick-half, cfg.TickSpacing)
-		curUpper = curLower + cfg.WidthTicks
+		if cfg.HasAssumedRange {
+			curLower = cfg.AssumedLowerTick
+			curUpper = cfg.AssumedUpperTick
+		} else {
+			targetLower, targetUpper, targetCenter := computeCenteredRange(currentTick, cfg.WidthTicks, cfg.TickSpacing)
+			return V3RebalanceResult{
+				Action:      "noop",
+				Reason:      "no_position",
+				CurrentTick: currentTick,
+				CurLower:    0,
+				CurUpper:    0,
+				NewLower:    targetLower,
+				NewUpper:    targetUpper,
+				NewCenter:   targetCenter,
+				WidthTicks:  cfg.WidthTicks,
+				BufferTicks: cfg.EdgeBufferTicks,
+			}, nil
+		}
 	}
 
 	if curUpper <= curLower {
@@ -402,6 +454,22 @@ func getParamInt64(params map[string]interface{}, key string) (int64, bool) {
 		return n, err == nil
 	default:
 		return 0, false
+	}
+}
+
+func getParamString(params map[string]interface{}, key string) (string, bool) {
+	if params == nil {
+		return "", false
+	}
+	v, ok := params[key]
+	if !ok {
+		return "", false
+	}
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t), true
+	default:
+		return "", false
 	}
 }
 

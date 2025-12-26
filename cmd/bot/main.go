@@ -157,6 +157,7 @@ func main() {
 	strat := strategy.NewBasicStrategy(strategyCfg)
 	mockStrat := strategy.NewMockRebalanceStrategyFromEnv()
 	v3Strat := strategy.NewV3RebalanceStrategy()
+	v3Pos := strategy.NewV3PositionResolver()
 	intentQueue := strategy.NewIntentQueue()
 
 	// 7. Initialize Storage (Phase 5)
@@ -260,6 +261,11 @@ func main() {
 	lastIntentType := ""
 	lastIntentSummary := ""
 	lastIntentFields := map[string]any(nil)
+	positionSource := ""
+	positionLower := int64(0)
+	positionUpper := int64(0)
+	positionTokenID := uint64(0)
+	var positionUpdatedAt time.Time
 
 	// Mock position
 	currentPos := engine.CurrentPosition{LowerTick: 200000, UpperTick: 202000, Liquidity: 1000}
@@ -328,6 +334,11 @@ func main() {
 				LastIntentType:    lastIntentType,
 				LastIntentSummary: lastIntentSummary,
 				LastIntentFields:  lastIntentFields,
+				PositionSource:    positionSource,
+				PositionLower:     positionLower,
+				PositionUpper:     positionUpper,
+				PositionTokenID:   positionTokenID,
+				PositionUpdatedAt: positionUpdatedAt,
 			})
 
 			if decisionBlocked {
@@ -348,6 +359,11 @@ func main() {
 					LastIntentType:    lastIntentType,
 					LastIntentSummary: lastIntentSummary,
 					LastIntentFields:  lastIntentFields,
+					PositionSource:    positionSource,
+					PositionLower:     positionLower,
+					PositionUpper:     positionUpper,
+					PositionTokenID:   positionTokenID,
+					PositionUpdatedAt: positionUpdatedAt,
 				})
 				continue
 			}
@@ -364,17 +380,18 @@ func main() {
 			currentCfg := cfgValue.Load().(*config.AppConfig)
 			v3Cfg := strategy.LoadV3RebalanceConfig(currentCfg)
 			if v3Cfg.Enabled {
-				inLower := currentPos.LowerTick
-				inUpper := currentPos.UpperTick
-				if v3Cfg.AssumedLowerTick != 0 || v3Cfg.AssumedUpperTick != 0 {
-					inLower = v3Cfg.AssumedLowerTick
-					inUpper = v3Cfg.AssumedUpperTick
-				}
+				posState := v3Pos.Resolve(ctx, time.Now(), v3Cfg)
+				positionSource = string(posState.Source)
+				positionLower = posState.LowerTick
+				positionUpper = posState.UpperTick
+				positionTokenID = posState.TokenID
+				positionUpdatedAt = posState.UpdatedAt
+
 				res, intent := v3Strat.EvaluateAt(v3Cfg, time.Now(), strategy.V3RebalanceInput{
 					ObservedAt:       time.Now(),
 					PoolTick:         currentPoolTick,
-					CurrentLowerTick: inLower,
-					CurrentUpperTick: inUpper,
+					CurrentLowerTick: posState.LowerTick,
+					CurrentUpperTick: posState.UpperTick,
 					AggPrice:         snap.Aggregate.AggPrice,
 					DivergencePct:    snap.Aggregate.DivergencePct,
 					RiskMode:         snap.Risk.Mode,
@@ -406,9 +423,15 @@ func main() {
 					lastIntentFields = nil
 				}
 
-				log.Printf("[StrategyV3] eval action=%s reason=%s current_tick=%d current_range=[%d,%d] new_range=[%d,%d]",
-					action, reason, res.CurrentTick, res.CurLower, res.CurUpper, res.NewLower, res.NewUpper)
+				log.Printf("[StrategyV3] eval action=%s reason=%s position_source=%s current_tick=%d current_range=[%d,%d] new_range=[%d,%d]",
+					action, reason, positionSource, res.CurrentTick, res.CurLower, res.CurUpper, res.NewLower, res.NewUpper)
 			} else {
+				positionSource = ""
+				positionLower = 0
+				positionUpper = 0
+				positionTokenID = 0
+				positionUpdatedAt = time.Time{}
+
 				action, reason, intents = mockStrat.EvaluateMock(strategy.MockRebalanceInput{
 					AggPrice:      snap.Aggregate.AggPrice,
 					DivergencePct: snap.Aggregate.DivergencePct,
@@ -437,6 +460,11 @@ func main() {
 				LastIntentType:    lastIntentType,
 				LastIntentSummary: lastIntentSummary,
 				LastIntentFields:  lastIntentFields,
+				PositionSource:    positionSource,
+				PositionLower:     positionLower,
+				PositionUpper:     positionUpper,
+				PositionTokenID:   positionTokenID,
+				PositionUpdatedAt: positionUpdatedAt,
 			})
 
 			log.Printf("[Strategy] eval action=%s reason=%s intents=%d agg_price=%.6f div_pct=%.6f", action, reason, len(intents), snap.Aggregate.AggPrice, snap.Aggregate.DivergencePct)

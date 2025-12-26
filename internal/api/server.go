@@ -49,6 +49,11 @@ type DecisionStatus struct {
 	LastIntentType    string         `json:"last_intent_type"`
 	LastIntentSummary string         `json:"last_intent_summary"`
 	LastIntentFields  map[string]any `json:"last_intent_fields"`
+	PositionSource    string         `json:"position_source"` // onchain|config_assumed|none
+	PositionLower     int64          `json:"position_lower"`
+	PositionUpper     int64          `json:"position_upper"`
+	PositionTokenID   uint64         `json:"position_token_id"`
+	PositionUpdatedAt time.Time      `json:"position_updated_at"`
 	LastGate          GateStatus     `json:"last_gate"`
 }
 
