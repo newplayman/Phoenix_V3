@@ -24,6 +24,19 @@ export BOT_PRIVATE_KEY="0xYOUR_TESTNET_KEY"
 # - DIVERGENCE_PCT: 默认 0.003（0.3%，两源偏差超过则 risk.mode=degraded）
 # - PRICE_MODE: 默认 ws_only；可选 ws_with_rest_fallback（显式开启旧 Binance/CoinGecko 轮询作为 fallback）
 
+### 本地自检：模拟 stale/frozen → 恢复（WS-only）
+
+脚本会：
+- 启动 bot（强制 dry-run、WS-only）
+- 等到 `market.stale=false`（行情正常）
+- 临时阻断 WS 出站（优先用 `sudo iptables`，否则提示你手动断网）
+- 观察 `risk.mode=frozen` + `decision.block_reason=price_frozen`
+- 恢复网络后自动回到 `stale=false`
+
+```bash
+API_PORT=18081 PRICE_MODE=ws_only bash scripts/repro_price_freeze_recovery.sh
+```
+
 # 安全：强制 dry_run（即使 config.yaml 设置为 false）
 # export PHOENIX_FORCE_DRY_RUN=1
 
