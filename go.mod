@@ -50,3 +50,7 @@ require (
 	golang.org/x/text v0.23.0 // indirect
 	gorm.io/driver/postgres v1.6.0 // indirect
 )
+
+require shared/contracts v0.0.0
+
+replace shared/contracts => ./shared/contracts
