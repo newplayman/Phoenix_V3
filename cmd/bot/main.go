@@ -26,11 +26,13 @@ import (
 	"phoenix-v3/internal/chain/univ3"
 	"phoenix-v3/internal/config"
 	"phoenix-v3/internal/contracts"
+	"phoenix-v3/internal/control/filecontrol"
 	"phoenix-v3/internal/dexstate"
 	"phoenix-v3/internal/engine"
 	"phoenix-v3/internal/events"
 	"phoenix-v3/internal/feed"
 	"phoenix-v3/internal/monitor"
+	"phoenix-v3/internal/obs/v1jsonl"
 	"phoenix-v3/internal/poolguard"
 	"phoenix-v3/internal/risk"
 	"phoenix-v3/internal/storage"
@@ -50,6 +52,16 @@ func main() {
 	defer cancel()
 
 	runID := fmt.Sprintf("phoenix-%d", time.Now().UnixNano())
+	v1w := v1jsonl.NewWriter("var/contract_v1.jsonl")
+	writeV1 := func(typ string, data any) {
+		if err := v1w.WriteEvent(typ, data); err != nil {
+			log.Printf("[v1jsonl] write failed: %v", err)
+		}
+	}
+	ctrlLoader := filecontrol.NewLoader("var/control.json")
+	controlState := filecontrol.Default()
+	var controlStateValue atomic.Value
+	controlStateValue.Store(controlState)
 
 	// 1. Load Configuration & watch for hot reload
 	configPath := os.Getenv("PHOENIX_CONFIG")
@@ -238,7 +250,7 @@ func main() {
 		adapter = univ3.NewAdapter(cfg.Pools[0].PositionManager)
 	}
 
-	go startIntentExecutor(ctx, &cfgValue, intentQueue, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer)
+	go startIntentExecutor(ctx, &cfgValue, intentQueue, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer, v1w, &controlStateValue)
 	if chainGateway != nil {
 		go startReceiptWatcher(ctx, chainGateway.Receipts(), store)
 	}
@@ -321,6 +333,58 @@ func main() {
 
 		case <-queryTicker.C:
 			now := time.Now()
+
+			if next, changed, err := ctrlLoader.LoadIfChanged(now); err != nil {
+				log.Printf("[Control] load failed: %v", err)
+			} else if changed {
+				controlStateValue.Store(next)
+				controlState = next
+				reasons := []string{"control_changed"}
+				if next.Reason != "" {
+					reasons = append(reasons, "reason="+next.Reason)
+				}
+				if next.DesiredState != "" {
+					reasons = append(reasons, "desired_state="+next.DesiredState)
+				}
+				if next.RiskMode != "" {
+					reasons = append(reasons, "risk_mode="+next.RiskMode)
+				}
+				if next.ForceDryRun {
+					reasons = append(reasons, "force_dry_run=true")
+				}
+				level := contractv1.RiskLevelSafe
+				switch strings.TrimSpace(next.RiskMode) {
+				case "DENY":
+					level = contractv1.RiskLevelDeny
+				case "PAUSE":
+					level = contractv1.RiskLevelPause
+				case "SAFE_MODE":
+					level = contractv1.RiskLevelSafeMode
+				case "HALT":
+					level = contractv1.RiskLevelHalt
+				}
+				if strings.TrimSpace(next.DesiredState) == "PAUSED" {
+					level = contractv1.RiskLevelPause
+				}
+				if strings.TrimSpace(next.DesiredState) == "SAFE_MODE" {
+					level = contractv1.RiskLevelSafeMode
+				}
+				ev := contractv1.RiskDecisionV1{
+					SchemaVersion: contractv1.SchemaVersion,
+					RunID:         runID,
+					TsLocalMS:     now.UnixMilli(),
+					Level:         level,
+					Reasons:       reasons,
+					Fields:        map[string]string{"source": "control.json"},
+					CooldownMS:    0,
+				}
+				apiServer.UpdateLastRiskV1(ev)
+				writeV1("RiskDecisionV1", ev)
+				log.Printf("[Control] applied desired_state=%s force_dry_run=%v risk_mode=%s", next.DesiredState, next.ForceDryRun, next.RiskMode)
+			} else {
+				controlState = next
+			}
+
 			manualOnly := os.Getenv("PHOENIX_MANUAL_ONLY") == "1"
 			autoEvalEnabled := os.Getenv("PHOENIX_AUTO_EVAL") == "1" && !manualOnly
 
@@ -376,6 +440,7 @@ func main() {
 				CooldownMS:    0,
 			}
 			apiServer.UpdateLastRiskV1(riskDecisionV1)
+			writeV1("RiskDecisionV1", riskDecisionV1)
 			if riskDecisionV1.Level != contractv1.RiskLevelSafe || autoEvalEnabled {
 				if b, err := json.Marshal(riskDecisionV1); err == nil {
 					log.Printf("[ContractV1] %s", string(b))
@@ -421,6 +486,14 @@ func main() {
 					PositionTokenID:   positionTokenID,
 					PositionUpdatedAt: positionUpdatedAt,
 				})
+				continue
+			}
+
+			// Control gate (file-based) has priority and is purely additive.
+			if strings.TrimSpace(controlState.RiskMode) != "" && strings.TrimSpace(controlState.RiskMode) != "SAFE" {
+				continue
+			}
+			if strings.TrimSpace(controlState.DesiredState) == "PAUSED" || strings.TrimSpace(controlState.DesiredState) == "SAFE_MODE" {
 				continue
 			}
 
@@ -487,10 +560,12 @@ func main() {
 					intents = append(intents, *intent)
 
 					apiServer.UpdateLastIntentV1(intentV1)
+					writeV1("IntentV1", intentV1)
 					if b, err := json.Marshal(intentV1); err == nil {
 						log.Printf("[ContractV1] %s", string(b))
 					}
 					if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+						writeV1("StatusV1", *st)
 						if b, err := json.Marshal(st); err == nil {
 							log.Printf("[ContractV1] %s", string(b))
 						}
@@ -544,6 +619,10 @@ func main() {
 				PositionTokenID:   positionTokenID,
 				PositionUpdatedAt: positionUpdatedAt,
 			})
+
+			if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+				writeV1("StatusV1", *st)
+			}
 
 			log.Printf("[Strategy] eval action=%s reason=%s intents=%d agg_price=%.6f div_pct=%.6f", action, reason, len(intents), snap.Aggregate.AggPrice, snap.Aggregate.DivergencePct)
 
@@ -1066,7 +1145,7 @@ func startPoolWatcher(ctx context.Context, uniState *dexstate.UniV3State, cfg *c
 	}()
 }
 
-func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server) {
+func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
 	go func() {
 		for {
 			intent := queue.Dequeue()
@@ -1083,12 +1162,12 @@ func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *str
 				continue
 			}
 
-			executeIntent(ctx, cfgValue, intent, riskMgr, guard, gw, store, stream, adapter, market, apiServer)
+			executeIntent(ctx, cfgValue, intent, riskMgr, guard, gw, store, stream, adapter, market, apiServer, v1w, controlValue)
 		}
 	}()
 }
 
-func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server) {
+func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
 	if intent.Metadata == nil {
 		intent.Metadata = make(map[string]string)
 	}
@@ -1101,6 +1180,112 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	v1TsMS := parseMetadataInt64(intent.Metadata, contractV1MetaTsLocalMS)
 	v1TTLMS := parseMetadataInt64(intent.Metadata, contractV1MetaTTLMS)
 	nowMS := time.Now().UnixMilli()
+
+	ctrl := filecontrol.Default()
+	if controlValue != nil {
+		if v := controlValue.Load(); v != nil {
+			if cs, ok := v.(filecontrol.ControlState); ok {
+				ctrl = cs
+			}
+		}
+	}
+	ctrlDesired := strings.TrimSpace(ctrl.DesiredState)
+	ctrlRiskMode := strings.TrimSpace(ctrl.RiskMode)
+	ctrlForceDry := ctrl.ForceDryRun
+
+	if ctrlRiskMode != "" && ctrlRiskMode != "SAFE" {
+		level := contractv1.RiskLevelDeny
+		switch ctrlRiskMode {
+		case "PAUSE":
+			level = contractv1.RiskLevelPause
+		case "SAFE_MODE":
+			level = contractv1.RiskLevelSafeMode
+		case "HALT":
+			level = contractv1.RiskLevelHalt
+		case "DENY":
+			level = contractv1.RiskLevelDeny
+		}
+		riskV1 := contractv1.RiskDecisionV1{
+			SchemaVersion: contractv1.SchemaVersion,
+			RunID:         v1RunID,
+			TsLocalMS:     nowMS,
+			Level:         level,
+			Reasons:       []string{"control_risk_mode_override", "risk_mode=" + ctrlRiskMode},
+			Fields:        map[string]string{"source": "control.json", "reason": ctrl.Reason},
+			CooldownMS:    0,
+		}
+		if apiServer != nil {
+			apiServer.UpdateLastRiskV1(riskV1)
+		}
+		writeV1("RiskDecisionV1", riskV1)
+
+		execV1 := contractv1.ExecutorResultV1{
+			SchemaVersion: contractv1.SchemaVersion,
+			IntentID:      v1IntentID,
+			TsLocalMS:     nowMS,
+			Status:        contractv1.ExecutionStatusSkipped,
+			ErrorKind:     contractv1.ErrorKindNone,
+			Receipt: map[string]any{
+				"skipped_reason":  "control_risk_mode_override",
+				"risk_mode":       ctrlRiskMode,
+				"would_broadcast": false,
+			},
+		}
+		if apiServer != nil {
+			apiServer.UpdateLastExecV1(execV1)
+		}
+		writeV1("ExecutorResultV1", execV1)
+		if apiServer != nil {
+			if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+				writeV1("StatusV1", *st)
+			}
+		}
+		return
+	}
+
+	if ctrlDesired == "PAUSED" || ctrlDesired == "SAFE_MODE" {
+		level := contractv1.RiskLevelPause
+		skippedReason := "control_paused"
+		if ctrlDesired == "SAFE_MODE" {
+			level = contractv1.RiskLevelSafeMode
+			skippedReason = "control_safe_mode"
+		}
+		riskV1 := contractv1.RiskDecisionV1{
+			SchemaVersion: contractv1.SchemaVersion,
+			RunID:         v1RunID,
+			TsLocalMS:     nowMS,
+			Level:         level,
+			Reasons:       []string{"control_desired_state", "desired_state=" + ctrlDesired},
+			Fields:        map[string]string{"source": "control.json", "reason": ctrl.Reason},
+			CooldownMS:    0,
+		}
+		if apiServer != nil {
+			apiServer.UpdateLastRiskV1(riskV1)
+		}
+		writeV1("RiskDecisionV1", riskV1)
+
+		execV1 := contractv1.ExecutorResultV1{
+			SchemaVersion: contractv1.SchemaVersion,
+			IntentID:      v1IntentID,
+			TsLocalMS:     nowMS,
+			Status:        contractv1.ExecutionStatusSkipped,
+			ErrorKind:     contractv1.ErrorKindNone,
+			Receipt: map[string]any{
+				"skipped_reason":  skippedReason,
+				"would_broadcast": false,
+			},
+		}
+		if apiServer != nil {
+			apiServer.UpdateLastExecV1(execV1)
+		}
+		writeV1("ExecutorResultV1", execV1)
+		if apiServer != nil {
+			if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+				writeV1("StatusV1", *st)
+			}
+		}
+		return
+	}
 
 	if v1TTLMS > 0 && v1TsMS > 0 && nowMS-v1TsMS > v1TTLMS {
 		execV1 := contractv1.ExecutorResultV1{
@@ -1120,11 +1305,13 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 		if apiServer != nil {
 			apiServer.UpdateLastExecV1(execV1)
 		}
+		writeV1("ExecutorResultV1", execV1)
 		if b, err := json.Marshal(execV1); err == nil {
 			log.Printf("[ContractV1] %s", string(b))
 		}
 		if apiServer != nil {
 			if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+				writeV1("StatusV1", *st)
 				if b, err := json.Marshal(st); err == nil {
 					log.Printf("[ContractV1] %s", string(b))
 				}
@@ -1161,6 +1348,7 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 			if apiServer != nil {
 				apiServer.UpdateLastRiskV1(riskV1)
 			}
+			writeV1("RiskDecisionV1", riskV1)
 			if b, err := json.Marshal(riskV1); err == nil {
 				log.Printf("[ContractV1] %s", string(b))
 			}
@@ -1182,11 +1370,13 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 			if apiServer != nil {
 				apiServer.UpdateLastExecV1(execV1)
 			}
+			writeV1("ExecutorResultV1", execV1)
 			if b, err := json.Marshal(execV1); err == nil {
 				log.Printf("[ContractV1] %s", string(b))
 			}
 			if apiServer != nil {
 				if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+					writeV1("StatusV1", *st)
 					if b, err := json.Marshal(st); err == nil {
 						log.Printf("[ContractV1] %s", string(b))
 					}
@@ -1258,6 +1448,9 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 
 	currentCfg := cfgValue.Load().(*config.AppConfig)
 	isDryRun := currentCfg.Strategy.DryRun
+	if ctrlForceDry {
+		isDryRun = true
+	}
 	if intent.Type == contracts.IntentMockRebalance || intent.Type == contracts.IntentRebalanceV3 {
 		// This intent is intentionally non-broadcasting.
 		isDryRun = true
@@ -1372,11 +1565,13 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	if apiServer != nil {
 		apiServer.UpdateLastExecV1(execV1)
 	}
+	writeV1("ExecutorResultV1", execV1)
 	if b, err := json.Marshal(execV1); err == nil {
 		log.Printf("[ContractV1] %s", string(b))
 	}
 	if apiServer != nil {
 		if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+			writeV1("StatusV1", *st)
 			if b, err := json.Marshal(st); err == nil {
 				log.Printf("[ContractV1] %s", string(b))
 			}
