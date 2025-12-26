@@ -10,6 +10,7 @@ This module is the single source of truth for **Contract v1** types used by Phoe
 - Amount/price/quantity values use **string** (decimal) when applicable.
 - Enums are encoded as JSON strings.
 - `execution_status` uses `CANCELED` (single-L). Do not introduce `CANCELLED` (double-L).
+- `execution_status` may be `SKIPPED` for non-error terminations (e.g. intent expired, risk gate blocked, or strategy decided no-op).
 
 ## Types
 
@@ -17,4 +18,3 @@ This module is the single source of truth for **Contract v1** types used by Phoe
 - `RiskDecisionV1`
 - `ExecutorResultV1`
 - `StatusV1`
-

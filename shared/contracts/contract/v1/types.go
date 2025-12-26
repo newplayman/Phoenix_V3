@@ -25,6 +25,7 @@ type ExecutionStatus string
 
 const (
 	ExecutionStatusSimulated       ExecutionStatus = "SIMULATED"
+	ExecutionStatusSkipped         ExecutionStatus = "SKIPPED"
 	ExecutionStatusSubmitted       ExecutionStatus = "SUBMITTED"
 	ExecutionStatusPartiallyFilled ExecutionStatus = "PARTIALLY_FILLED"
 	ExecutionStatusFilled          ExecutionStatus = "FILLED"
