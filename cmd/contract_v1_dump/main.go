@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	contractv1 "phoenix-v3/internal/shared/contract/v1"
+	contractv1 "shared/contracts/contract/v1"
 )
 
 type dumpLine struct {
@@ -37,6 +37,7 @@ func main() {
 		IntentType:    contractv1.IntentTypeRebalanceV3,
 		TsLocalMS:     now.UnixMilli(),
 		DryRun:        true,
+		TTLms:         0,
 		Params: map[string]any{
 			"pool":              "v3",
 			"tick_lower":        int64(200000),
@@ -56,6 +57,7 @@ func main() {
 		TsLocalMS:     now.UnixMilli(),
 		Level:         contractv1.RiskLevelSafe,
 		Reasons:       []string{},
+		Fields:        map[string]string{},
 		CooldownMS:    0,
 	}
 	execResult := contractv1.ExecutorResultV1{
@@ -96,7 +98,7 @@ func main() {
 	}
 	enumList := enums{
 		IntentType:      []contractv1.IntentType{contractv1.IntentTypeRebalanceV3, contractv1.IntentTypeCexMake, contractv1.IntentTypeArbitrage, contractv1.IntentTypeHedgePerp},
-		RiskLevel:       []contractv1.RiskLevel{contractv1.RiskLevelSafe, contractv1.RiskLevelDeny, contractv1.RiskLevelPause, contractv1.RiskLevelSafeMode},
+		RiskLevel:       []contractv1.RiskLevel{contractv1.RiskLevelSafe, contractv1.RiskLevelDeny, contractv1.RiskLevelPause, contractv1.RiskLevelSafeMode, contractv1.RiskLevelHalt},
 		ExecutionStatus: []contractv1.ExecutionStatus{contractv1.ExecutionStatusSimulated, contractv1.ExecutionStatusSubmitted, contractv1.ExecutionStatusPartiallyFilled, contractv1.ExecutionStatusFilled, contractv1.ExecutionStatusCanceled, contractv1.ExecutionStatusFailed},
 		ErrorKind:       []contractv1.ErrorKind{contractv1.ErrorKindNone, contractv1.ErrorKindTransient, contractv1.ErrorKindAuth, contractv1.ErrorKindRateLimit, contractv1.ErrorKindInsufficientBalance, contractv1.ErrorKindBadParams, contractv1.ErrorKindUnknown},
 		Mode:            []contractv1.Mode{contractv1.ModeDryRun, contractv1.ModeShadow, contractv1.ModeLive, contractv1.ModePaper},

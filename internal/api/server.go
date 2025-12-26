@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"phoenix-v3/internal/feed"
-	contractv1 "phoenix-v3/internal/shared/contract/v1"
 	"phoenix-v3/internal/strategy"
+	contractv1 "shared/contracts/contract/v1"
 )
 
 type Server struct {

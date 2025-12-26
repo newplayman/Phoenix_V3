@@ -33,9 +33,9 @@ import (
 	"phoenix-v3/internal/monitor"
 	"phoenix-v3/internal/poolguard"
 	"phoenix-v3/internal/risk"
-	contractv1 "phoenix-v3/internal/shared/contract/v1"
 	"phoenix-v3/internal/storage"
 	"phoenix-v3/internal/strategy"
+	contractv1 "shared/contracts/contract/v1"
 )
 
 func main() {
@@ -339,12 +339,17 @@ func main() {
 			}
 
 			riskLevelV1 := contractv1.RiskLevelSafe
-			reasonsV1 := []string(nil)
+			reasonsV1 := make([]string, 0, 2)
+			fieldsV1 := make(map[string]string, 4)
 			if manualOnly {
 				riskLevelV1 = contractv1.RiskLevelPause
 				reasonsV1 = append(reasonsV1, "manual_only")
+				fieldsV1["block_reason"] = "manual_only"
 			} else if riskMode != "normal" {
 				reasonsV1 = append(reasonsV1, fmt.Sprintf("market_risk_mode=%s reason=%s stale_age_ms=%d", riskMode, gateReason, staleAgeMs))
+				fieldsV1["risk_mode"] = riskMode
+				fieldsV1["gate_reason"] = gateReason
+				fieldsV1["stale_age_ms"] = fmt.Sprintf("%d", staleAgeMs)
 				switch riskMode {
 				case "degraded":
 					riskLevelV1 = contractv1.RiskLevelPause
@@ -360,6 +365,7 @@ func main() {
 				TsLocalMS:     now.UnixMilli(),
 				Level:         riskLevelV1,
 				Reasons:       reasonsV1,
+				Fields:        fieldsV1,
 				CooldownMS:    0,
 			})
 

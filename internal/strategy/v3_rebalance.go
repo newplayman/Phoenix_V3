@@ -12,7 +12,7 @@ import (
 
 	"phoenix-v3/internal/config"
 	"phoenix-v3/internal/contracts"
-	contractv1 "phoenix-v3/internal/shared/contract/v1"
+	contractv1 "shared/contracts/contract/v1"
 )
 
 type V3RebalanceConfig struct {
@@ -436,6 +436,7 @@ func ToIntentV1FromRebalance(intent contracts.Intent, now time.Time, dryRun bool
 		IntentType:    contractv1.IntentTypeRebalanceV3,
 		TsLocalMS:     now.UnixMilli(),
 		DryRun:        dryRun,
+		TTLms:         0,
 		Params:        params,
 		Fields:        fields,
 		Summary:       summary,
