@@ -74,6 +74,7 @@ const (
 	IntentCollectFee    IntentType = "collect_fee"
 	IntentSwap          IntentType = "swap"
 	IntentMockRebalance IntentType = "mock_rebalance"
+	IntentRebalanceV3   IntentType = "v3_rebalance"
 )
 
 type Intent struct {

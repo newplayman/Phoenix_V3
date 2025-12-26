@@ -43,6 +43,12 @@ export PHOENIX_AUTO_EVAL="${PHOENIX_AUTO_EVAL:-1}"
 export PHOENIX_STRATEGY_KIND="${PHOENIX_STRATEGY_KIND:-mock}"
 export DECISION_INTERVAL_SEC="${DECISION_INTERVAL_SEC:-5}"
 
+# Optional: enable V3 rebalance strategy (takes priority over mock).
+ENABLE_V3="${ENABLE_V3:-0}"
+if [[ "$ENABLE_V3" == "1" ]]; then
+  export STRAT_V3_ENABLED=1
+fi
+
 # Market feed: WS-only by default.
 export PRICE_MODE="${PRICE_MODE:-ws_only}"
 export PRICE_SYMBOL="${PRICE_SYMBOL:-ETH/USDT}"

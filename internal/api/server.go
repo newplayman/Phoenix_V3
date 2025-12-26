@@ -39,14 +39,17 @@ type SystemStatus struct {
 }
 
 type DecisionStatus struct {
-	Enabled         bool       `json:"enabled"`
-	Blocked         bool       `json:"blocked"`
-	BlockReason     string     `json:"block_reason"`
-	AutoEvalEnabled bool       `json:"auto_eval_enabled"`
-	LastEvalAt      time.Time  `json:"last_eval_at"`
-	LastEvalAction  string     `json:"last_eval_action"` // noop|mock_rebalance|blocked|...
-	LastEvalReason  string     `json:"last_eval_reason"`
-	LastGate        GateStatus `json:"last_gate"`
+	Enabled           bool           `json:"enabled"`
+	Blocked           bool           `json:"blocked"`
+	BlockReason       string         `json:"block_reason"`
+	AutoEvalEnabled   bool           `json:"auto_eval_enabled"`
+	LastEvalAt        time.Time      `json:"last_eval_at"`
+	LastEvalAction    string         `json:"last_eval_action"` // noop|mock_rebalance|blocked|...
+	LastEvalReason    string         `json:"last_eval_reason"`
+	LastIntentType    string         `json:"last_intent_type"`
+	LastIntentSummary string         `json:"last_intent_summary"`
+	LastIntentFields  map[string]any `json:"last_intent_fields"`
+	LastGate          GateStatus     `json:"last_gate"`
 }
 
 type GateStatus struct {

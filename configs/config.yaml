@@ -31,6 +31,16 @@ strategy:
   dry_run: true
   params:
     threshold: 0.05
+    # V3 tick-range rebalance strategy (used only when STRAT_V3_ENABLED=1 or env overrides enable it)
+    STRAT_V3_ENABLED: 0
+    STRAT_V3_WIDTH_TICKS: 600
+    STRAT_V3_EDGE_BUFFER_TICKS: 60
+    STRAT_V3_COOLDOWN_SEC: 300
+    STRAT_V3_MIN_TICK_MOVE: 30
+    STRAT_V3_TICK_SPACING: 60
+    # Optional assumed position range (to test triggers without reading wallet positions)
+    # STRAT_V3_ASSUMED_LOWER_TICK: -120000
+    # STRAT_V3_ASSUMED_UPPER_TICK: -119400
 
 risk:
   max_daily_gas: 1.0

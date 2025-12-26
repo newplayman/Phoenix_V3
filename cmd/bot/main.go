@@ -156,6 +156,7 @@ func main() {
 	strategyCfg := buildStrategyConfig(cfg)
 	strat := strategy.NewBasicStrategy(strategyCfg)
 	mockStrat := strategy.NewMockRebalanceStrategyFromEnv()
+	v3Strat := strategy.NewV3RebalanceStrategy()
 	intentQueue := strategy.NewIntentQueue()
 
 	// 7. Initialize Storage (Phase 5)
@@ -256,9 +257,13 @@ func main() {
 	var lastEvalAt time.Time
 	lastEvalAction := ""
 	lastEvalReason := ""
+	lastIntentType := ""
+	lastIntentSummary := ""
+	lastIntentFields := map[string]any(nil)
 
 	// Mock position
 	currentPos := engine.CurrentPosition{LowerTick: 200000, UpperTick: 202000, Liquidity: 1000}
+	var currentPoolTick int64 = (currentPos.LowerTick + currentPos.UpperTick) / 2
 
 	for {
 		select {
@@ -290,6 +295,7 @@ func main() {
 				dexPriceReady.Store(true)
 			}
 			log.Printf("[DEX] Pool %s tick=%d liquidity=%s dexPrice=%.2f", state.PoolAddress, state.CurrentTick, state.Liquidity, currentDexPrice)
+			currentPoolTick = state.CurrentTick
 			currentPos = engine.CurrentPosition{
 				LowerTick: state.CurrentTick - 200,
 				UpperTick: state.CurrentTick + 200,
@@ -316,9 +322,12 @@ func main() {
 
 			// Keep /api/status decision fields up-to-date even when auto-eval is disabled.
 			apiServer.UpdateDecision(api.DecisionStatus{
-				LastEvalAt:     lastEvalAt,
-				LastEvalAction: lastEvalAction,
-				LastEvalReason: lastEvalReason,
+				LastEvalAt:        lastEvalAt,
+				LastEvalAction:    lastEvalAction,
+				LastEvalReason:    lastEvalReason,
+				LastIntentType:    lastIntentType,
+				LastIntentSummary: lastIntentSummary,
+				LastIntentFields:  lastIntentFields,
 			})
 
 			if decisionBlocked {
@@ -333,9 +342,12 @@ func main() {
 				lastEvalAction = "blocked"
 				lastEvalReason = blockReason
 				apiServer.UpdateDecision(api.DecisionStatus{
-					LastEvalAt:     lastEvalAt,
-					LastEvalAction: lastEvalAction,
-					LastEvalReason: lastEvalReason,
+					LastEvalAt:        lastEvalAt,
+					LastEvalAction:    lastEvalAction,
+					LastEvalReason:    lastEvalReason,
+					LastIntentType:    lastIntentType,
+					LastIntentSummary: lastIntentSummary,
+					LastIntentFields:  lastIntentFields,
 				})
 				continue
 			}
@@ -345,38 +357,58 @@ func main() {
 				continue
 			}
 
-			// Evaluate strategy (mock by default for auto-eval).
-			strategyKind := strings.ToLower(strings.TrimSpace(os.Getenv("PHOENIX_STRATEGY_KIND")))
-			if strategyKind == "" {
-				strategyKind = "mock"
-			}
-
 			var intents []contracts.Intent
 			action := "noop"
 			reason := "noop"
 
-			switch strategyKind {
-			case "basic":
-				input := engine.EngineInput{
-					CexPrice:   snap.Aggregate.AggPrice,
-					DexPrice:   currentDexPrice,
-					Volatility: 0.02,
-					Position:   currentPos,
-					Params:     engine.StrategyParams{RiskFactor: 1.0},
+			currentCfg := cfgValue.Load().(*config.AppConfig)
+			v3Cfg := strategy.LoadV3RebalanceConfig(currentCfg)
+			if v3Cfg.Enabled {
+				inLower := currentPos.LowerTick
+				inUpper := currentPos.UpperTick
+				if v3Cfg.AssumedLowerTick != 0 || v3Cfg.AssumedUpperTick != 0 {
+					inLower = v3Cfg.AssumedLowerTick
+					inUpper = v3Cfg.AssumedUpperTick
 				}
-				out, err := strat.Evaluate(context.Background(), input)
-				if err != nil {
-					log.Printf("[Strategy] eval error=%v", err)
-					action = "noop"
-					reason = "error"
-				} else {
-					intents = out
-					if len(out) > 0 {
-						action = string(out[0].Type)
-						reason = "generated"
+				res, intent := v3Strat.EvaluateAt(v3Cfg, time.Now(), strategy.V3RebalanceInput{
+					ObservedAt:       time.Now(),
+					PoolTick:         currentPoolTick,
+					CurrentLowerTick: inLower,
+					CurrentUpperTick: inUpper,
+					AggPrice:         snap.Aggregate.AggPrice,
+					DivergencePct:    snap.Aggregate.DivergencePct,
+					RiskMode:         snap.Risk.Mode,
+					RiskReason:       snap.Risk.Reason,
+					StaleAgeMs:       snap.Aggregate.StaleAgeMs,
+				})
+				action = res.Action
+				reason = res.Reason
+				if intent != nil {
+					intents = append(intents, *intent)
+					lastIntentType = string(intent.Type)
+					lastIntentSummary = fmt.Sprintf("%s cur=[%d,%d] tick=%d new=[%d,%d]", reason, res.CurLower, res.CurUpper, res.CurrentTick, res.NewLower, res.NewUpper)
+					lastIntentFields = map[string]any{
+						"type":                   string(intent.Type),
+						"reason":                 reason,
+						"current_tick":           res.CurrentTick,
+						"current_lower":          res.CurLower,
+						"current_upper":          res.CurUpper,
+						"new_lower":              res.NewLower,
+						"new_upper":              res.NewUpper,
+						"new_center_tick":        res.NewCenter,
+						"width_ticks":            res.WidthTicks,
+						"edge_buffer_ticks":      res.BufferTicks,
+						"cooldown_remaining_sec": res.CooldownLeft,
 					}
+				} else {
+					lastIntentType = ""
+					lastIntentSummary = ""
+					lastIntentFields = nil
 				}
-			default:
+
+				log.Printf("[StrategyV3] eval action=%s reason=%s current_tick=%d current_range=[%d,%d] new_range=[%d,%d]",
+					action, reason, res.CurrentTick, res.CurLower, res.CurUpper, res.NewLower, res.NewUpper)
+			} else {
 				action, reason, intents = mockStrat.EvaluateMock(strategy.MockRebalanceInput{
 					AggPrice:      snap.Aggregate.AggPrice,
 					DivergencePct: snap.Aggregate.DivergencePct,
@@ -384,15 +416,27 @@ func main() {
 					RiskReason:    snap.Risk.Reason,
 					StaleAgeMs:    snap.Aggregate.StaleAgeMs,
 				})
+				if len(intents) > 0 {
+					lastIntentType = string(intents[0].Type)
+					lastIntentSummary = reason
+					lastIntentFields = map[string]any{"type": lastIntentType, "reason": reason}
+				} else {
+					lastIntentType = ""
+					lastIntentSummary = ""
+					lastIntentFields = nil
+				}
 			}
 
 			lastEvalAt = time.Now()
 			lastEvalAction = action
 			lastEvalReason = reason
 			apiServer.UpdateDecision(api.DecisionStatus{
-				LastEvalAt:     lastEvalAt,
-				LastEvalAction: lastEvalAction,
-				LastEvalReason: lastEvalReason,
+				LastEvalAt:        lastEvalAt,
+				LastEvalAction:    lastEvalAction,
+				LastEvalReason:    lastEvalReason,
+				LastIntentType:    lastIntentType,
+				LastIntentSummary: lastIntentSummary,
+				LastIntentFields:  lastIntentFields,
 			})
 
 			log.Printf("[Strategy] eval action=%s reason=%s intents=%d agg_price=%.6f div_pct=%.6f", action, reason, len(intents), snap.Aggregate.AggPrice, snap.Aggregate.DivergencePct)
@@ -963,7 +1007,7 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 
 	currentCfg := cfgValue.Load().(*config.AppConfig)
 	isDryRun := currentCfg.Strategy.DryRun
-	if intent.Type == contracts.IntentMockRebalance {
+	if intent.Type == contracts.IntentMockRebalance || intent.Type == contracts.IntentRebalanceV3 {
 		// This intent is intentionally non-broadcasting.
 		isDryRun = true
 	}
