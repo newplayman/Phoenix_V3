@@ -114,7 +114,17 @@ func (a *PriceAggregator) Snapshot() MarketSnapshot {
 
 	outSources := make([]PriceSourceState, 0, len(a.sources))
 	for _, st := range a.sources {
-		outSources = append(outSources, st.PriceSourceState)
+		s := st.PriceSourceState
+		age := time.Duration(0)
+		if !s.LastUpdateAt.IsZero() {
+			age = now.Sub(s.LastUpdateAt)
+			if age < 0 {
+				age = 0
+			}
+		}
+		s.UpdateAgeMs = durationMs(age)
+		s.Fresh = !s.LastUpdateAt.IsZero() && s.LastPrice > 0 && age <= a.cfg.StaleWindow
+		outSources = append(outSources, s)
 	}
 	sort.Slice(outSources, func(i, j int) bool { return outSources[i].Name < outSources[j].Name })
 
@@ -253,14 +263,17 @@ func (a *PriceAggregator) recomputeLocked(now time.Time) (aggUpdated bool) {
 		t    time.Time
 	}
 	var freshes []fresh
+	var connectedStale []string
 	for _, st := range a.sources {
-		if st.LastUpdateAt.IsZero() || st.LastPrice <= 0 {
-			continue
-		}
-		if now.Sub(st.LastUpdateAt) <= a.cfg.StaleWindow {
+		age := now.Sub(st.LastUpdateAt)
+		isFresh := !st.LastUpdateAt.IsZero() && st.LastPrice > 0 && age <= a.cfg.StaleWindow
+		if isFresh {
 			freshes = append(freshes, fresh{name: st.Name, p: st.LastPrice, t: st.LastUpdateAt})
+		} else if st.Connected && !st.LastUpdateAt.IsZero() && st.LastPrice > 0 && age > a.cfg.StaleWindow {
+			connectedStale = append(connectedStale, st.Name)
 		}
 	}
+	sort.Strings(connectedStale)
 
 	prevUpdatedAt := a.agg.AggUpdatedAt
 	prevPrice := a.agg.AggPrice
@@ -298,7 +311,11 @@ func (a *PriceAggregator) recomputeLocked(now time.Time) (aggUpdated bool) {
 		divPct = 0
 		conf = 0.7
 		mode = "degraded"
-		reason = "single_source"
+		if len(connectedStale) > 0 {
+			reason = "one_source_stale:" + connectedStale[0]
+		} else {
+			reason = "single_source"
+		}
 	} else {
 		// No fresh source: keep last aggregate; staleness will handle gate/risk.
 		aggPrice = a.agg.AggPrice

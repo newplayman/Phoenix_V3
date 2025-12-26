@@ -22,6 +22,8 @@ type PriceSourceState struct {
 	Connected    bool      `json:"connected"`
 	LastPrice    float64   `json:"last_price"`
 	LastUpdateAt time.Time `json:"last_update_at"`
+	Fresh        bool      `json:"fresh"`
+	UpdateAgeMs  int64     `json:"update_age_ms"`
 	LatencyMs    int64     `json:"latency_ms"`
 	Err1m        int       `json:"err_1m"`
 	LastErr      string    `json:"last_err"`
