@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"encoding/json"
 	"errors"
+	"math/big"
 	"net/url"
 	"os"
 	"strings"
@@ -22,6 +24,7 @@ type TradeRecord struct {
 	ChainID         int64     `gorm:"index"`
 	TxHash          string    `gorm:"type:varchar(66)"`
 	Status          string    `gorm:"type:varchar(32)"`
+	MetaJSON        string    `gorm:"type:text"`
 	PnL             float64
 	IsSimulation    bool   `gorm:"index"`
 	StrategyVersion string `gorm:"type:varchar(64)"`
@@ -112,8 +115,50 @@ func (s *Store) GetRecentTrades(limit int) ([]TradeRecord, error) {
 	return trades, err
 }
 
+func (s *Store) GetTradesSince(start time.Time) ([]TradeRecord, error) {
+	var trades []TradeRecord
+	err := s.db.Where("time >= ?", start).Order("time desc").Find(&trades).Error
+	return trades, err
+}
+
 func (s *Store) UpdateTradeStatusByHash(txHash string, status string) error {
 	return s.db.Model(&TradeRecord{}).
 		Where("tx_hash = ?", txHash).
 		Update("status", status).Error
+}
+
+func (s *Store) UpdateTradeReceiptByHash(txHash string, status string, gasUsed uint64, gasPriceWei *big.Int) error {
+	if txHash == "" {
+		return nil
+	}
+	var tr TradeRecord
+	if err := s.db.Where("tx_hash = ?", txHash).First(&tr).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	meta := make(map[string]any)
+	if tr.MetaJSON != "" {
+		_ = json.Unmarshal([]byte(tr.MetaJSON), &meta)
+	}
+	meta["receipt_status"] = status
+	meta["gas_used"] = gasUsed
+	if gasPriceWei != nil && gasPriceWei.Sign() >= 0 {
+		meta["gas_price_wei"] = gasPriceWei.String()
+		if gasUsed > 0 && gasPriceWei.Sign() > 0 {
+			gasCostWei := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), gasPriceWei)
+			meta["gas_cost_wei"] = gasCostWei.String()
+		}
+	}
+	meta["receipt_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	b, _ := json.Marshal(meta)
+
+	return s.db.Model(&TradeRecord{}).
+		Where("id = ?", tr.ID).
+		Updates(map[string]any{
+			"status":    status,
+			"meta_json": string(b),
+		}).Error
 }

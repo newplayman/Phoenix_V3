@@ -3,6 +3,7 @@ package risk
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 type RiskMode string
@@ -25,6 +26,8 @@ type Manager struct {
 
 	Drawdown    float64
 	MaxDrawdown float64 // e.g. 0.10 for 10%
+
+	lastIntentAt time.Time
 }
 
 func NewManager(maxGas float64, maxFails int, maxDrawdown float64) *Manager {
@@ -85,4 +88,28 @@ func (m *Manager) RecordSuccess() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ConsecutiveFails = 0
+	m.lastIntentAt = time.Now()
+}
+
+func (m *Manager) UpdateLimits(maxGas float64, maxFails int, maxDrawdown float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if maxGas > 0 {
+		m.MaxDailyGas = maxGas
+	}
+	if maxFails > 0 {
+		m.MaxFails = maxFails
+	}
+	if maxDrawdown > 0 && maxDrawdown < 1 {
+		m.MaxDrawdown = maxDrawdown
+	}
+}
+
+func (m *Manager) ShouldThrottle(minInterval time.Duration) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if minInterval <= 0 {
+		return false
+	}
+	return time.Since(m.lastIntentAt) < minInterval
 }

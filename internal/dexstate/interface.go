@@ -1,18 +1,6 @@
 package dexstate
 
-import (
-	"math/big"
+import "phoenix-v3/internal/contracts"
 
-	"github.com/ethereum/go-ethereum/common"
-)
-
-type PoolState struct {
-	ChainID     int64
-	PoolAddress common.Address
-	CurrentTick int64
-	Liquidity   *big.Int
-}
-
-type DexState interface {
-	GetPoolState(chainID int64, poolAddress common.Address) (*PoolState, error)
-}
+type PoolState = contracts.PoolState
+type DexState = contracts.DexState

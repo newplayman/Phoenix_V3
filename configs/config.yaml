@@ -28,7 +28,7 @@ pools:
 
 strategy:
   name: "basic_rebalance"
-  dry_run: false
+  dry_run: true
   params:
     threshold: 0.05
 

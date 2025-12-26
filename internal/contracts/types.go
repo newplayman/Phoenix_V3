@@ -72,6 +72,7 @@ const (
 	IntentRebalance  IntentType = "rebalance"
 	IntentWithdraw   IntentType = "withdraw"
 	IntentCollectFee IntentType = "collect_fee"
+	IntentSwap       IntentType = "swap"
 )
 
 type Intent struct {

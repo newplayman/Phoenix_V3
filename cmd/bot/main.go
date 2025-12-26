@@ -1,23 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"math/big"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 
 	"phoenix-v3/internal/api"
 	"phoenix-v3/internal/chain/gateway"
 	"phoenix-v3/internal/chain/univ3"
 	"phoenix-v3/internal/config"
+	"phoenix-v3/internal/contracts"
 	"phoenix-v3/internal/dexstate"
 	"phoenix-v3/internal/engine"
 	"phoenix-v3/internal/events"
@@ -34,7 +42,11 @@ func main() {
 	defer cancel()
 
 	// 1. Load Configuration & watch for hot reload
-	cfgManager, err := config.NewManager("configs/config.yaml")
+	configPath := os.Getenv("PHOENIX_CONFIG")
+	if configPath == "" {
+		configPath = "configs/config.yaml"
+	}
+	cfgManager, err := config.NewManager(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
@@ -46,6 +58,13 @@ func main() {
 	var cfgValue atomic.Value
 	cfgValue.Store(cfg)
 
+	// Safety: allow forcing dry-run via env (never auto-enable real broadcasts from this patch).
+	if os.Getenv("PHOENIX_FORCE_DRY_RUN") == "1" && !cfg.Strategy.DryRun {
+		cfg.Strategy.DryRun = true
+		cfgValue.Store(cfg)
+		log.Printf("[Safety] PHOENIX_FORCE_DRY_RUN=1 -> strategy.dry_run=true")
+	}
+
 	// 2. Initialize Monitor
 	monitorService := monitor.NewMonitor(cfg.Monitoring)
 	go monitorService.Start()
@@ -53,6 +72,7 @@ func main() {
 	// Create price cache to store real prices from Binance
 	var currentPrice float64 = 2005.0 // Default fallback price
 	var currentDexPrice float64 = currentPrice
+	var dexPriceReady atomic.Bool
 	var isBinanceConnected bool = false
 	token0Decimals := 18
 	token1Decimals := 18
@@ -67,46 +87,46 @@ func main() {
 
 	eventStream := initEventStream(cfg)
 
-	priceAggregator := feed.NewAggregator()
-	defer priceAggregator.Close()
+	priceCfg := feed.LoadPriceAggregatorConfigFromEnv()
+	priceAgg := feed.NewPriceAggregator(priceCfg)
+	priceAgg.Start(ctx)
+	defer priceAgg.Close()
 	go func() {
-		for t := range priceAggregator.Output() {
+		for t := range priceAgg.Output() {
 			_ = eventStream.Publish(ctx, events.TopicTicker, t)
 		}
 	}()
 
-	// 3. Start CEX Feed (Binance)
-	binanceFeed := feed.NewBinanceFeed()
-	binanceFeed.OnStatusUpdate(func(status feed.FeedStatus) {
-		monitorService.UpdateFeedMetric(monitor.FeedMetric{
-			Source:       status.Source,
-			Healthy:      status.Healthy,
-			DelayMs:      status.DelayMs,
-			LastUpdateAt: status.LastUpdateAt,
+	// Optional REST fallback (default off): legacy Binance/CoinGecko polling.
+	if !priceCfg.WSOnly() {
+		log.Printf("[Market] PRICE_MODE=%s (WS is primary; REST is explicit fallback)", priceCfg.PriceMode)
+		binanceFeed := feed.NewBinanceFeed()
+		binanceFeed.OnStatusUpdate(func(status feed.FeedStatus) {
+			monitorService.UpdateFeedMetric(monitor.FeedMetric{
+				Source:       status.Source,
+				Healthy:      status.Healthy,
+				DelayMs:      status.DelayMs,
+				LastUpdateAt: status.LastUpdateAt,
+			})
 		})
-	})
-	// Try to subscribe to Binance, use fallback if fails
-	tickerResult, err := binanceFeed.SubscribeTicker("ETHUSDT")
-	if err != nil {
-		log.Printf("⚠️ Failed to subscribe to Binance: %v", err)
-	} else {
-		isBinanceConnected = true
-		log.Println("✅ Subscribed to Binance ETHUSDT")
-		priceAggregator.AddSource("binance", tickerResult)
-	}
-	coingeckoFeed := feed.NewCoinGeckoFeed(5 * time.Second)
-	coingeckoFeed.OnStatusUpdate(func(status feed.FeedStatus) {
-		monitorService.UpdateFeedMetric(monitor.FeedMetric{
-			Source:       status.Source,
-			Healthy:      status.Healthy,
-			DelayMs:      status.DelayMs,
-			LastUpdateAt: status.LastUpdateAt,
-		})
-	})
-	if cgChan, err := coingeckoFeed.SubscribeTicker("ETHUSDT"); err != nil {
-		log.Printf("⚠️ Failed to subscribe CoinGecko: %v", err)
-	} else {
-		priceAggregator.AddSource("coingecko", cgChan)
+		if tickerResult, err := binanceFeed.SubscribeTicker("ETHUSDT"); err == nil {
+			isBinanceConnected = true
+			log.Println("✅ Subscribed to Binance REST/WS fallback ETHUSDT")
+			// Legacy aggregator channel already aggregates; feed into events stream directly.
+			go func() {
+				for t := range tickerResult {
+					_ = eventStream.Publish(ctx, events.TopicTicker, t)
+				}
+			}()
+		}
+		coingeckoFeed := feed.NewCoinGeckoFeed(5 * time.Second)
+		if cgChan, err := coingeckoFeed.SubscribeTicker("ETHUSDT"); err == nil {
+			go func() {
+				for t := range cgChan {
+					_ = eventStream.Publish(ctx, events.TopicTicker, t)
+				}
+			}()
+		}
 	}
 
 	priceEvents, cancelPriceSub, _ := eventStream.Subscribe(events.TopicTicker)
@@ -139,12 +159,8 @@ func main() {
 
 	// 8. Initialize Gateway (Phase 4)
 	privKey := os.Getenv("BOT_PRIVATE_KEY")
-	if privKey == "" {
-		log.Fatal("BOT_PRIVATE_KEY not set")
-	}
-	chainGateway, err := gateway.NewEthGateway(cfg.Chains[0].RPC, privKey)
-	if err != nil {
-		log.Printf("[Gateway] Failed to init (Check RPC): %v", err)
+	if privKey == "" && !cfg.Strategy.DryRun {
+		log.Fatal("BOT_PRIVATE_KEY not set (set strategy.dry_run=true to run without broadcasting)")
 	}
 
 	// 9. Initialize API Server
@@ -152,6 +168,7 @@ func main() {
 		BinanceConnected: isBinanceConnected,
 		PriceSource:      map[bool]string{true: "Binance", false: "Fallback"}[isBinanceConnected],
 	})
+	apiServer.SetMarketAggregator(priceAgg)
 
 	// Initialize API with current price
 	apiServer.UpdateCEXPrice(feed.Ticker{
@@ -160,7 +177,33 @@ func main() {
 		Timestamp: time.Now(),
 	})
 
-	apiServer.Start("8080")
+	apiPort := os.Getenv("API_PORT")
+	if apiPort == "" {
+		apiPort = "8081"
+	}
+	apiServer.Start(apiPort)
+
+	if err := quoterRuntimePreflight(ctx, cfg); err != nil {
+		if os.Getenv("PHOENIX_SWAP_REQUIRE_QUOTER") == "1" {
+			log.Fatalf("[Quoter] preflight failed (PHOENIX_SWAP_REQUIRE_QUOTER=1): %v", err)
+		}
+		log.Printf("[Quoter] preflight warning: %v", err)
+	}
+
+	var chainGateway *gateway.EthGateway
+	if privKey == "" {
+		log.Printf("[Gateway] BOT_PRIVATE_KEY not set; chain gateway disabled (dry_run=true)")
+	} else {
+		ethGw, err := gateway.NewEthGateway(cfg.Chains[0].RPC, privKey)
+		if err != nil {
+			log.Printf("[Gateway] Failed to init (Check RPC): %v", err)
+		} else {
+			chainGateway = ethGw
+		}
+	}
+	if chainGateway != nil {
+		go startPnLAndAlertLoop(ctx, apiServer, store, chainGateway, &cfgValue, &currentPrice, &currentDexPrice, &dexPriceReady)
+	}
 
 	// 10. Initialize Risk & PoolGuard (Phase 6)
 	riskMgr := risk.NewManager(cfg.Risk.MaxDailyGas, cfg.Risk.ConsecutiveFails, cfg.Risk.MaxDrawdown)
@@ -175,7 +218,7 @@ func main() {
 		adapter = univ3.NewAdapter(cfg.Pools[0].PositionManager)
 	}
 
-	go startIntentExecutor(ctx, &cfgValue, intentQueue, riskMgr, guard, chainGateway, store, eventStream, adapter)
+	go startIntentExecutor(ctx, &cfgValue, intentQueue, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer)
 	if chainGateway != nil {
 		go startReceiptWatcher(ctx, chainGateway.Receipts(), store)
 	}
@@ -193,6 +236,9 @@ func main() {
 
 	queryTicker := time.NewTicker(5 * time.Second)
 	defer queryTicker.Stop()
+	manualOnly := os.Getenv("PHOENIX_MANUAL_ONLY") == "1"
+	lastDecisionBlocked := false
+	lastDecisionReason := ""
 
 	// Mock position
 	currentPos := engine.CurrentPosition{LowerTick: 200000, UpperTick: 202000, Liquidity: 1000}
@@ -224,6 +270,7 @@ func main() {
 			dexPrice := tickToDexPrice(state.CurrentTick, token0Decimals, token1Decimals)
 			if dexPrice > 0 {
 				currentDexPrice = dexPrice
+				dexPriceReady.Store(true)
 			}
 			log.Printf("[DEX] Pool %s tick=%d liquidity=%s dexPrice=%.2f", state.PoolAddress, state.CurrentTick, state.Liquidity, currentDexPrice)
 			currentPos = engine.CurrentPosition{
@@ -233,6 +280,21 @@ func main() {
 			}
 
 		case <-queryTicker.C:
+			enabled := !manualOnly
+			blocked, blockReason, age, _ := priceAgg.GetGate(time.Now())
+
+			if (!enabled) || blocked {
+				if blocked != lastDecisionBlocked || blockReason != lastDecisionReason {
+					lastDecisionBlocked = blocked
+					lastDecisionReason = blockReason
+					if !enabled {
+						log.Printf("[Decision] blocked reason=manual_only")
+					} else {
+						log.Printf("[Decision] blocked reason=%s age_ms=%d", blockReason, age.Milliseconds())
+					}
+				}
+				continue
+			}
 			// 1. Strategy Step
 			input := engine.EngineInput{
 				CexPrice:   currentPrice,
@@ -253,6 +315,385 @@ func main() {
 			}
 		}
 	}
+}
+
+type pnlBaselineFile struct {
+	UpdatedAt string             `json:"updated_at"`
+	Baselines map[string]float64 `json:"baselines"`
+}
+
+func startPnLAndAlertLoop(
+	ctx context.Context,
+	apiServer *api.Server,
+	store *storage.Store,
+	ethGw *gateway.EthGateway,
+	cfgValue *atomic.Value,
+	ethPricePtr *float64,
+	dexPricePtr *float64,
+	dexPriceReady *atomic.Bool,
+) {
+	if apiServer == nil || store == nil || ethGw == nil || cfgValue == nil {
+		return
+	}
+	maxDailyGasUSD := parseEnvFloat("PHOENIX_ALERT_MAX_DAILY_GAS_USD", 5.0)
+	maxDailyLossUSD := parseEnvFloat("PHOENIX_ALERT_MAX_DAILY_LOSS_USD", 5.0)
+	webhookURL := strings.TrimSpace(os.Getenv("PHOENIX_ALERT_WEBHOOK_URL"))
+
+	lastSent := map[string]time.Time{}
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		now := time.Now().UTC()
+		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		last24h := now.Add(-24 * time.Hour)
+
+		trades24h, _ := store.GetTradesSince(last24h)
+		tradesDay, _ := store.GetTradesSince(startOfDay)
+		allRecent, _ := store.GetRecentTrades(2000)
+
+		ethPrice := 0.0
+		if ethPricePtr != nil {
+			ethPrice = *ethPricePtr
+		}
+		dexPrice := 0.0
+		if dexPricePtr != nil && dexPriceReady != nil && dexPriceReady.Load() {
+			dexPrice = *dexPricePtr
+		}
+
+		totalGasUSD := sumGasUSD(allRecent, ethPrice)
+		dailyGasUSD := sumGasUSD(tradesDay, ethPrice)
+
+		currentCfg, _ := cfgValue.Load().(*config.AppConfig)
+		portfolioUSD := computePortfolioUSD(ctx, ethGw, currentCfg, ethPrice, dexPrice)
+		dailyBaselineUSD := getOrSetBaselineUSD(currentCfg, ethGw.Address(), now.Format("2006-01-02"), portfolioUSD)
+		totalBaselineUSD := getOrSetBaselineUSD(currentCfg, ethGw.Address(), "ALL", portfolioUSD)
+
+		dailyPnLUSD := (portfolioUSD - dailyBaselineUSD) - dailyGasUSD
+		totalPnLUSD := (portfolioUSD - totalBaselineUSD) - totalGasUSD
+
+		snapshot := api.PnLSnapshot{
+			UpdatedAt:        now,
+			PortfolioUSD:     portfolioUSD,
+			BaselineUSD:      dailyBaselineUSD,
+			TotalBaselineUSD: totalBaselineUSD,
+			DailyGasUSD:      dailyGasUSD,
+			TotalGasUSD:      totalGasUSD,
+			DailyPnLUSD:      dailyPnLUSD,
+			TotalPnLUSD:      totalPnLUSD,
+			TradesCount24h:   len(trades24h),
+		}
+		apiServer.UpdatePnL(snapshot)
+
+		var alerts []api.Alert
+		if maxDailyGasUSD > 0 && dailyGasUSD > maxDailyGasUSD {
+			alerts = append(alerts, api.Alert{
+				Key:       "daily_gas_exceeded",
+				Severity:  "warn",
+				Message:   fmt.Sprintf("daily gas cost exceeded: %.4f USD > %.4f USD", dailyGasUSD, maxDailyGasUSD),
+				CreatedAt: now,
+			})
+		}
+		if maxDailyLossUSD > 0 && dailyPnLUSD < -maxDailyLossUSD {
+			alerts = append(alerts, api.Alert{
+				Key:       "daily_loss_exceeded",
+				Severity:  "critical",
+				Message:   fmt.Sprintf("daily PnL below limit: %.4f USD < -%.4f USD", dailyPnLUSD, maxDailyLossUSD),
+				CreatedAt: now,
+			})
+		}
+		apiServer.UpdateAlerts(alerts)
+
+		for _, a := range alerts {
+			if webhookURL == "" {
+				continue
+			}
+			if t, ok := lastSent[a.Key]; ok && now.Sub(t) < 10*time.Minute {
+				continue
+			}
+			if err := postWebhookAlert(webhookURL, a); err != nil {
+				log.Printf("[Alert] webhook post failed: %v", err)
+				continue
+			}
+			lastSent[a.Key] = now
+		}
+	}
+}
+
+func sumGasUSD(trades []storage.TradeRecord, ethPrice float64) float64 {
+	if len(trades) == 0 || ethPrice <= 0 {
+		return 0
+	}
+	total := 0.0
+	for _, tr := range trades {
+		if tr.MetaJSON == "" {
+			continue
+		}
+		var meta map[string]any
+		if err := json.Unmarshal([]byte(tr.MetaJSON), &meta); err != nil {
+			continue
+		}
+		cw, ok := meta["gas_cost_wei"]
+		if !ok {
+			continue
+		}
+		s, ok := cw.(string)
+		if !ok || strings.TrimSpace(s) == "" {
+			continue
+		}
+		wei := new(big.Int)
+		if _, ok := wei.SetString(s, 10); !ok {
+			continue
+		}
+		if wei.Sign() <= 0 {
+			continue
+		}
+		// usd = wei / 1e18 * ethPrice
+		fwei := new(big.Float).SetInt(wei)
+		feth := new(big.Float).Quo(fwei, big.NewFloat(1e18))
+		fusd := new(big.Float).Mul(feth, big.NewFloat(ethPrice))
+		v, _ := fusd.Float64()
+		total += v
+	}
+	return total
+}
+
+func parseEnvFloat(key string, def float64) float64 {
+	s := strings.TrimSpace(os.Getenv(key))
+	if s == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return def
+	}
+	return v
+}
+
+func postWebhookAlert(url string, alert api.Alert) error {
+	body, _ := json.Marshal(map[string]any{
+		"type":  "phoenix_alert",
+		"alert": alert,
+	})
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("webhook status %s", resp.Status)
+	}
+	return nil
+}
+
+func computePortfolioUSD(parent context.Context, ethGw *gateway.EthGateway, cfg *config.AppConfig, ethUSD float64, dexPriceToken0PerToken1 float64) float64 {
+	if ethGw == nil || cfg == nil || len(cfg.Pools) == 0 || ethUSD <= 0 {
+		return 0
+	}
+	pool := cfg.Pools[0]
+	ctx, cancel := context.WithTimeout(parent, 6*time.Second)
+	defer cancel()
+
+	nativeWei, err := ethGw.BalanceOfNative(ctx)
+	if err != nil {
+		return 0
+	}
+	totalUSD := weiToETH(nativeWei) * ethUSD
+
+	priceOverrides := parsePriceOverrides(os.Getenv("PHOENIX_PRICE_USD_OVERRIDES"))
+	stables := parseAddressSet(os.Getenv("PHOENIX_STABLE_TOKENS"))
+
+	// Default: if no stable list is configured and token decimals look like a stablecoin, assume $1 for token1.
+	if stables == nil && pool.Token1Decimals == 6 && common.IsHexAddress(pool.Token1) {
+		stables = map[string]struct{}{common.HexToAddress(pool.Token1).Hex(): {}}
+	}
+
+	token1Hex := common.HexToAddress(pool.Token1).Hex()
+	token0Hex := common.HexToAddress(pool.Token0).Hex()
+	token1USD := tokenUSDPrice(token1Hex, stables, priceOverrides)
+	token0USD := tokenUSDPrice(token0Hex, stables, priceOverrides)
+	if token0USD == 0 && token1USD > 0 && dexPriceToken0PerToken1 > 0 {
+		token0USD = token1USD / dexPriceToken0PerToken1
+	}
+
+	if common.IsHexAddress(pool.Token0) && pool.Token0Decimals > 0 && token0USD > 0 {
+		if b0, err := ethGw.BalanceOfERC20(ctx, common.HexToAddress(pool.Token0)); err == nil {
+			totalUSD += unitsToFloat(b0, pool.Token0Decimals) * token0USD
+		}
+	}
+	if common.IsHexAddress(pool.Token1) && pool.Token1Decimals > 0 && token1USD > 0 {
+		if b1, err := ethGw.BalanceOfERC20(ctx, common.HexToAddress(pool.Token1)); err == nil {
+			totalUSD += unitsToFloat(b1, pool.Token1Decimals) * token1USD
+		}
+	}
+	return totalUSD
+}
+
+func getOrSetBaselineUSD(cfg *config.AppConfig, wallet string, label string, currentUSD float64) float64 {
+	if cfg == nil || wallet == "" || currentUSD <= 0 {
+		return 0
+	}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = time.Now().UTC().Format("2006-01-02")
+	}
+	key := baselineKey(cfg, wallet, label)
+
+	if os.Getenv("PHOENIX_PNL_RESET_BASELINE") == "1" {
+		return persistBaselineUSD(cfg, wallet, label, key, currentUSD, true)
+	}
+
+	path := strings.TrimSpace(os.Getenv("PHOENIX_PNL_BASELINE_FILE"))
+	if path == "" {
+		path = filepath.Join(os.Getenv("HOME"), ".config", "phoenix", "pnl_baseline.json")
+	}
+
+	state := pnlBaselineFile{Baselines: map[string]float64{}}
+	if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
+		_ = json.Unmarshal(b, &state)
+		if state.Baselines == nil {
+			state.Baselines = map[string]float64{}
+		}
+	}
+	if v, ok := state.Baselines[key]; ok && v > 0 {
+		return v
+	}
+	return persistBaselineUSD(cfg, wallet, label, key, currentUSD, false)
+}
+
+func baselineKey(cfg *config.AppConfig, wallet string, label string) string {
+	chainID := int64(0)
+	if cfg != nil && len(cfg.Chains) > 0 {
+		chainID = cfg.Chains[0].ID
+	}
+	return fmt.Sprintf("%d:%s:%s", chainID, strings.ToLower(strings.TrimSpace(wallet)), label)
+}
+
+func persistBaselineUSD(cfg *config.AppConfig, wallet string, label string, key string, currentUSD float64, overwrite bool) float64 {
+	path := strings.TrimSpace(os.Getenv("PHOENIX_PNL_BASELINE_FILE"))
+	if path == "" {
+		path = filepath.Join(os.Getenv("HOME"), ".config", "phoenix", "pnl_baseline.json")
+	}
+
+	state := pnlBaselineFile{Baselines: map[string]float64{}}
+	if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
+		_ = json.Unmarshal(b, &state)
+		if state.Baselines == nil {
+			state.Baselines = map[string]float64{}
+		}
+	}
+	if !overwrite {
+		if v, ok := state.Baselines[key]; ok && v > 0 {
+			return v
+		}
+	}
+	state.Baselines[key] = currentUSD
+	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
+		_ = os.WriteFile(path, out, 0o600)
+	}
+	return currentUSD
+}
+
+func parseAddressSet(raw string) map[string]struct{} {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	m := make(map[string]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		s := strings.TrimSpace(part)
+		if s == "" {
+			continue
+		}
+		if !common.IsHexAddress(s) {
+			continue
+		}
+		m[common.HexToAddress(s).Hex()] = struct{}{}
+	}
+	return m
+}
+
+func parsePriceOverrides(raw string) map[string]float64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	m := make(map[string]float64)
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		addr := strings.TrimSpace(kv[0])
+		val := strings.TrimSpace(kv[1])
+		if !common.IsHexAddress(addr) {
+			continue
+		}
+		f, err := strconv.ParseFloat(val, 64)
+		if err != nil || f <= 0 {
+			continue
+		}
+		m[common.HexToAddress(addr).Hex()] = f
+	}
+	return m
+}
+
+func tokenUSDPrice(token string, stables map[string]struct{}, overrides map[string]float64) float64 {
+	if overrides != nil {
+		if v, ok := overrides[token]; ok && v > 0 {
+			return v
+		}
+	}
+	if stables != nil {
+		if _, ok := stables[token]; ok {
+			return 1.0
+		}
+	}
+	return 0
+}
+
+func weiToETH(wei *big.Int) float64 {
+	if wei == nil || wei.Sign() <= 0 {
+		return 0
+	}
+	fwei := new(big.Float).SetInt(wei)
+	feth := new(big.Float).Quo(fwei, big.NewFloat(1e18))
+	v, _ := feth.Float64()
+	return v
+}
+
+func unitsToFloat(units *big.Int, decimals int) float64 {
+	if units == nil || units.Sign() == 0 {
+		return 0
+	}
+	if decimals <= 0 {
+		f, _ := new(big.Float).SetInt(units).Float64()
+		return f
+	}
+	den := new(big.Float).SetFloat64(math.Pow10(decimals))
+	num := new(big.Float).SetInt(units)
+	out := new(big.Float).Quo(num, den)
+	v, _ := out.Float64()
+	return v
 }
 
 func buildStrategyConfig(cfg *config.AppConfig) strategy.BasicStrategyConfig {
@@ -388,7 +829,7 @@ func startPoolWatcher(ctx context.Context, uniState *dexstate.UniV3State, cfg *c
 	}()
 }
 
-func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter) {
+func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server) {
 	go func() {
 		for {
 			intent := queue.Dequeue()
@@ -405,14 +846,21 @@ func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *str
 				continue
 			}
 
-			executeIntent(ctx, cfgValue, intent, riskMgr, guard, gw, store, stream, adapter)
+			executeIntent(ctx, cfgValue, intent, riskMgr, guard, gw, store, stream, adapter, market, apiServer)
 		}
 	}()
 }
 
-func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter) {
+func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, _ *api.Server) {
 	if intent.Metadata == nil {
 		intent.Metadata = make(map[string]string)
+	}
+	if market != nil {
+		r := market.GetRisk()
+		if strings.ToLower(strings.TrimSpace(r.Mode)) == "frozen" {
+			log.Printf("[MarketGate] reject intent %s reason=price_frozen", intent.ID)
+			return
+		}
 	}
 	if err := riskMgr.CanProceed(); err != nil {
 		log.Printf("[Risk] skip intent %s: %v", intent.ID, err)
@@ -432,6 +880,18 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	var txHash string
 	var status string
 
+	if !isDryRun && intent.Type != contracts.IntentSwap && adapter == nil {
+		log.Printf("[IntentExecutor] skip intent %s (non-swap broadcast disabled without adapter)", intent.ID)
+		riskMgr.RecordFailure()
+		return
+	}
+
+	if err := maybePrepareSwapHelperCall(ctx, currentCfg, &intent); err != nil {
+		log.Printf("[Swap] skip intent %s: %v", intent.ID, err)
+		riskMgr.RecordFailure()
+		return
+	}
+
 	if !isDryRun && adapter != nil {
 		if addrProvider, ok := gw.(interface{ Address() string }); ok {
 			intent.Metadata["recipient"] = addrProvider.Address()
@@ -446,8 +906,13 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 
 	if !isDryRun {
 		if ethGw, ok := gw.(*gateway.EthGateway); ok {
-			if !hasSufficientBalances(ctx, ethGw, intent.Metadata) {
-				log.Printf("[BalanceGuard] skip intent %s due to insufficient token balance", intent.ID)
+			if err := maybeEnsureSwapAllowance(ctx, currentCfg, ethGw, store, intent); err != nil {
+				log.Printf("[Swap] allowance/approve failed for intent %s: %v", intent.ID, err)
+				riskMgr.RecordFailure()
+				return
+			}
+			if ok, reason := hasSufficientBalances(ctx, ethGw, intent.Metadata); !ok {
+				log.Printf("[BalanceGuard] skip intent %s: %s", intent.ID, reason)
 				riskMgr.RecordFailure()
 				return
 			}
@@ -480,6 +945,7 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 		ChainID:         intent.ChainID,
 		TxHash:          txHash,
 		Status:          status,
+		MetaJSON:        buildTradeMetaJSON(intent, txHash, status, isDryRun),
 		PnL:             0,
 		IsSimulation:    isDryRun,
 		StrategyVersion: intent.StrategyVersion,
@@ -492,6 +958,78 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	}
 
 	_ = stream.Publish(ctx, events.TopicIntentExec, record)
+}
+
+func maybeEnsureSwapAllowance(parent context.Context, cfg *config.AppConfig, ethGw *gateway.EthGateway, store *storage.Store, intent strategy.Intent) error {
+	if cfg == nil || ethGw == nil {
+		return nil
+	}
+	if intent.Type != contracts.IntentSwap && strings.ToLower(strings.TrimSpace(intent.Metadata["action"])) != "swap_exact_in" {
+		return nil
+	}
+	tokenInAddr := strings.TrimSpace(intent.Metadata["swap_token_in"])
+	amtInStr := strings.TrimSpace(intent.Metadata["swap_amount_in"])
+	spender := strings.TrimSpace(intent.Metadata["swap_helper"])
+	if spender == "" {
+		spender = strings.TrimSpace(intent.Metadata["target"])
+	}
+	if tokenInAddr == "" || amtInStr == "" || spender == "" {
+		return nil
+	}
+	if !common.IsHexAddress(tokenInAddr) || !common.IsHexAddress(spender) {
+		return nil
+	}
+	amountIn := new(big.Int)
+	if _, ok := amountIn.SetString(amtInStr, 10); !ok || amountIn.Sign() <= 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	defer cancel()
+
+	token := common.HexToAddress(tokenInAddr)
+	spenderAddr := common.HexToAddress(spender)
+	allow, err := ethGw.AllowanceERC20(ctx, token, ethGw.WalletAddress(), spenderAddr)
+	if err != nil {
+		return err
+	}
+	if allow.Cmp(amountIn) >= 0 {
+		return nil
+	}
+
+	maxUint := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	log.Printf("[Swap] allowance %s < amountIn %s; approving spender=%s", allow.String(), amountIn.String(), spenderAddr.Hex())
+
+	// Some tokens require setting allowance to 0 before changing it.
+	if allow.Sign() > 0 {
+		tx0, err := ethGw.ApproveERC20(ctx, token, spenderAddr, big.NewInt(0))
+		if err != nil {
+			return err
+		}
+		rcpt0, err := ethGw.WaitMined(ctx, tx0.Hash)
+		if err != nil {
+			return err
+		}
+		if rcpt0.Status != 1 {
+			return fmt.Errorf("approve(0) reverted: %s", tx0.Hash.Hex())
+		}
+		saveApproveTradeRecord(store, intent, token, spenderAddr, big.NewInt(0), tx0.Hash.Hex(), rcpt0.Status == 1)
+	}
+
+	tx, err := ethGw.ApproveERC20(ctx, token, spenderAddr, maxUint)
+	if err != nil {
+		return err
+	}
+	rcpt, err := ethGw.WaitMined(ctx, tx.Hash)
+	if err != nil {
+		return err
+	}
+	if rcpt.Status != 1 {
+		return fmt.Errorf("approve(max) reverted: %s", tx.Hash.Hex())
+	}
+	log.Printf("[Swap] approve mined tx=%s", tx.Hash.Hex())
+	saveApproveTradeRecord(store, intent, token, spenderAddr, maxUint, tx.Hash.Hex(), rcpt.Status == 1)
+	return nil
 }
 
 func parseMetadataFloat(meta map[string]string, key string) float64 {
@@ -509,6 +1047,92 @@ func parseMetadataFloat(meta map[string]string, key string) float64 {
 	return f
 }
 
+func buildTradeMetaJSON(intent strategy.Intent, txHash string, status string, isDryRun bool) string {
+	meta := make(map[string]any, 32)
+	meta["intent_id"] = intent.ID
+	meta["intent_type"] = string(intent.Type)
+	meta["pool_id"] = intent.PoolID
+	meta["chain_id"] = intent.ChainID
+	meta["tx_hash"] = txHash
+	meta["status"] = status
+	meta["is_simulation"] = isDryRun
+	meta["captured_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+	// Curated, audit-useful fields only (avoid secrets; do not store BOT_PRIVATE_KEY or ADMIN_TOKEN).
+	for _, k := range []string{
+		"action",
+		"target",
+		"value",
+		"recipient",
+		"calldata",
+
+		"swap_pool",
+		"swap_token_in",
+		"swap_token_out",
+		"swap_fee",
+		"swap_amount_in",
+		"swap_slippage_bps",
+		"swap_slippage_bps_effective",
+		"swap_quote_method",
+		"swap_quote_amount_out",
+		"swap_amount_out_minimum",
+		"swap_helper",
+
+		"approve_tx_hash",
+		"approve_amount",
+		"approve_token",
+		"approve_spender",
+	} {
+		if intent.Metadata != nil {
+			if v := strings.TrimSpace(intent.Metadata[k]); v != "" {
+				meta[k] = v
+			}
+		}
+	}
+
+	meta["manual_only"] = os.Getenv("PHOENIX_MANUAL_ONLY")
+	meta["swap_require_quoter"] = os.Getenv("PHOENIX_SWAP_REQUIRE_QUOTER")
+	meta["swap_force_confirm"] = os.Getenv("PHOENIX_SWAP_FORCE_CONFIRM")
+
+	b, _ := json.Marshal(meta)
+	return string(b)
+}
+
+func saveApproveTradeRecord(store *storage.Store, intent strategy.Intent, token common.Address, spender common.Address, amount *big.Int, txHash string, ok bool) {
+	if store == nil || txHash == "" {
+		return
+	}
+	status := "failed"
+	if ok {
+		status = "success"
+	}
+	meta := map[string]any{
+		"action":          "approve",
+		"approve_token":   token.Hex(),
+		"approve_spender": spender.Hex(),
+		"approve_amount": func() string {
+			if amount == nil {
+				return "0"
+			}
+			return amount.String()
+		}(),
+	}
+	b, _ := json.Marshal(meta)
+	_ = store.SaveTrade(&storage.TradeRecord{
+		Time:            time.Now(),
+		IntentID:        intent.ID,
+		Type:            "approve",
+		PoolID:          intent.PoolID,
+		ChainID:         intent.ChainID,
+		TxHash:          txHash,
+		Status:          status,
+		MetaJSON:        string(b),
+		IsSimulation:    false,
+		StrategyVersion: intent.StrategyVersion,
+		RiskMode:        intent.RiskMode,
+	})
+}
+
 func startReceiptWatcher(ctx context.Context, receipts <-chan gateway.ReceiptResult, store *storage.Store) {
 	if store == nil || receipts == nil {
 		return
@@ -521,22 +1145,57 @@ func startReceiptWatcher(ctx context.Context, receipts <-chan gateway.ReceiptRes
 			if !ok {
 				return
 			}
-			if err := store.UpdateTradeStatusByHash(receipt.Hash.Hex(), string(receipt.Status)); err != nil {
+			if err := store.UpdateTradeReceiptByHash(receipt.Hash.Hex(), string(receipt.Status), receipt.GasUsed, receipt.GasPriceWei); err != nil {
 				log.Printf("[ReceiptWatcher] update %s failed: %v", receipt.Hash.Hex(), err)
 			}
 		}
 	}
 }
 
-func hasSufficientBalances(ctx context.Context, gw *gateway.EthGateway, meta map[string]string) bool {
+func hasSufficientBalances(ctx context.Context, gw *gateway.EthGateway, meta map[string]string) (bool, string) {
+	// Swap guard: require token-in balance >= amountIn.
+	if meta != nil {
+		swapTokenIn := strings.TrimSpace(meta["swap_token_in"])
+		swapAmountIn := strings.TrimSpace(meta["swap_amount_in"])
+		if swapTokenIn != "" && swapAmountIn != "" && common.IsHexAddress(swapTokenIn) {
+			required := new(big.Int)
+			if _, ok := required.SetString(swapAmountIn, 10); ok && required.Sign() > 0 {
+				bal, err := gw.BalanceOfERC20(ctx, common.HexToAddress(swapTokenIn))
+				if err != nil {
+					return false, fmt.Sprintf("balanceOf failed token=%s err=%v", common.HexToAddress(swapTokenIn).Hex(), err)
+				}
+				if bal.Cmp(required) < 0 {
+					missing := new(big.Int).Sub(required, bal)
+					return false, fmt.Sprintf(
+						"insufficient swap tokenIn balance token=%s balance=%s required=%s missing=%s",
+						common.HexToAddress(swapTokenIn).Hex(),
+						bal.String(),
+						required.String(),
+						missing.String(),
+					)
+				}
+			}
+		}
+	}
+
 	token0 := meta["token0"]
 	amount0 := meta["amount0"]
 	if token0 != "" && amount0 != "" {
 		required := new(big.Int)
 		if _, ok := required.SetString(amount0, 10); ok {
 			bal, err := gw.BalanceOfERC20(ctx, common.HexToAddress(token0))
-			if err != nil || bal.Cmp(required) < 0 {
-				return false
+			if err != nil {
+				return false, fmt.Sprintf("balanceOf failed token=%s err=%v", common.HexToAddress(token0).Hex(), err)
+			}
+			if bal.Cmp(required) < 0 {
+				missing := new(big.Int).Sub(required, bal)
+				return false, fmt.Sprintf(
+					"insufficient token0 balance token=%s balance=%s required=%s missing=%s",
+					common.HexToAddress(token0).Hex(),
+					bal.String(),
+					required.String(),
+					missing.String(),
+				)
 			}
 		}
 	}
@@ -546,10 +1205,374 @@ func hasSufficientBalances(ctx context.Context, gw *gateway.EthGateway, meta map
 		required := new(big.Int)
 		if _, ok := required.SetString(amount1, 10); ok {
 			bal, err := gw.BalanceOfERC20(ctx, common.HexToAddress(token1))
-			if err != nil || bal.Cmp(required) < 0 {
-				return false
+			if err != nil {
+				return false, fmt.Sprintf("balanceOf failed token=%s err=%v", common.HexToAddress(token1).Hex(), err)
+			}
+			if bal.Cmp(required) < 0 {
+				missing := new(big.Int).Sub(required, bal)
+				return false, fmt.Sprintf(
+					"insufficient token1 balance token=%s balance=%s required=%s missing=%s",
+					common.HexToAddress(token1).Hex(),
+					bal.String(),
+					required.String(),
+					missing.String(),
+				)
 			}
 		}
 	}
-	return true
+	return true, "ok"
+}
+
+type ethClientCaller struct {
+	c *ethclient.Client
+}
+
+func (e ethClientCaller) Call(ctx context.Context, to common.Address, data []byte) ([]byte, error) {
+	if e.c == nil {
+		return nil, context.Canceled
+	}
+	msg := ethereum.CallMsg{To: &to, Data: data}
+	return e.c.CallContract(ctx, msg, nil)
+}
+
+func quoterRuntimePreflight(parent context.Context, cfg *config.AppConfig) error {
+	if cfg == nil || len(cfg.Chains) == 0 || len(cfg.Pools) == 0 {
+		return nil
+	}
+	chain := cfg.Chains[0]
+	pool := cfg.Pools[0]
+
+	quoterAddr := strings.TrimSpace(chain.QuoterAddress)
+	if quoterAddr == "" {
+		quoterAddr = strings.TrimSpace(os.Getenv("ARBITRUM_SEPOLIA_QUOTER_ADDRESS"))
+	}
+	if quoterAddr == "" {
+		return nil
+	}
+	if !common.IsHexAddress(quoterAddr) {
+		return fmt.Errorf("invalid quoter address: %q", quoterAddr)
+	}
+	if chain.RPC == "" || !common.IsHexAddress(pool.Token0) || !common.IsHexAddress(pool.Token1) || pool.Fee <= 0 {
+		return nil
+	}
+
+	amountIn := new(big.Int)
+	if preflightAmt := strings.TrimSpace(os.Getenv("PHOENIX_QUOTER_PREFLIGHT_AMOUNT_IN")); preflightAmt != "" {
+		amountIn.SetString(preflightAmt, 10)
+	} else if pool.Amount0 != "" {
+		// Prefer configured amount0; fall back to amount1.
+		amountIn.SetString(pool.Amount0, 10)
+	} else if pool.Amount1 != "" {
+		amountIn.SetString(pool.Amount1, 10)
+	}
+	// If config amounts are unset/zero, use a non-trivial default to avoid rounding to zero.
+	if amountIn.Sign() <= 0 {
+		amountIn.SetInt64(1_000_000)
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	c, err := ethclient.DialContext(ctx, chain.RPC)
+	if err != nil {
+		return err
+	}
+
+	q, err := univ3.NewQuoter(quoterAddr)
+	if err != nil {
+		return err
+	}
+	code, err := c.CodeAt(ctx, q.Address, nil)
+	if err != nil {
+		return err
+	}
+	if len(code) == 0 {
+		return fmt.Errorf("no contract code at quoter address: %s", q.Address.Hex())
+	}
+
+	tokenIn := common.HexToAddress(pool.Token0)
+	tokenOut := common.HexToAddress(pool.Token1)
+	fee := uint32(pool.Fee)
+	caller := ethClientCaller{c: c}
+
+	// Prefer single-params quote if available; otherwise fall back to path quote.
+	if out, err := q.QuoteExactInputSingle(ctx, caller, tokenIn, tokenOut, fee, amountIn, big.NewInt(0)); err == nil && out != nil && out.Sign() > 0 {
+		log.Printf("[Quoter] quoteExactInputSingle ok amountIn=%s amountOut=%s", amountIn.String(), out.String())
+		return nil
+	}
+	out, err := q.QuoteExactInput(ctx, caller, tokenIn, tokenOut, fee, amountIn)
+	if err != nil {
+		return err
+	}
+	if out == nil || out.Sign() <= 0 {
+		return fmt.Errorf("unexpected quote amountOut: %v", out)
+	}
+	log.Printf("[Quoter] quoteExactInput(path) ok amountIn=%s amountOut=%s", amountIn.String(), out.String())
+	return nil
+}
+
+func maybePrepareSwapHelperCall(parent context.Context, cfg *config.AppConfig, intent *strategy.Intent) error {
+	if cfg == nil || intent == nil {
+		return nil
+	}
+
+	// Trigger conditions:
+	// - intent.Type == swap
+	// - OR intent.Metadata["action"] == "swap_exact_in"
+	if intent.Type != contracts.IntentSwap && strings.ToLower(strings.TrimSpace(intent.Metadata["action"])) != "swap_exact_in" {
+		return nil
+	}
+	if len(cfg.Chains) == 0 || len(cfg.Pools) == 0 {
+		return fmt.Errorf("missing chain/pool config")
+	}
+
+	chain := cfg.Chains[0]
+	poolCfg := cfg.Pools[0]
+
+	if err := enforceSwapPolicy(cfg, intent); err != nil {
+		return err
+	}
+
+	swapHelperAddr := strings.TrimSpace(chain.SwapHelperAddress)
+	if swapHelperAddr == "" {
+		swapHelperAddr = strings.TrimSpace(os.Getenv("PHOENIX_SWAP_HELPER_ADDRESS"))
+	}
+	if swapHelperAddr == "" {
+		return fmt.Errorf("swap helper address not set (chains[0].swap_helper_address or PHOENIX_SWAP_HELPER_ADDRESS)")
+	}
+	if !common.IsHexAddress(swapHelperAddr) {
+		return fmt.Errorf("invalid swap helper address: %q", swapHelperAddr)
+	}
+
+	quoterAddr := strings.TrimSpace(chain.QuoterAddress)
+	if quoterAddr == "" {
+		quoterAddr = strings.TrimSpace(os.Getenv("ARBITRUM_SEPOLIA_QUOTER_ADDRESS"))
+	}
+	requireQuoter := os.Getenv("PHOENIX_SWAP_REQUIRE_QUOTER") == "1"
+	if requireQuoter && quoterAddr == "" {
+		return fmt.Errorf("PHOENIX_SWAP_REQUIRE_QUOTER=1 but quoter address not set (chains[0].quoter_address or ARBITRUM_SEPOLIA_QUOTER_ADDRESS)")
+	}
+
+	swapPoolAddr := strings.TrimSpace(intent.Metadata["swap_pool"])
+	if swapPoolAddr == "" {
+		swapPoolAddr = strings.TrimSpace(poolCfg.Address)
+	}
+	if swapPoolAddr == "" || !common.IsHexAddress(swapPoolAddr) {
+		return fmt.Errorf("swap_pool missing/invalid (metadata swap_pool or pools[0].address)")
+	}
+
+	tokenInAddr := strings.TrimSpace(intent.Metadata["swap_token_in"])
+	tokenOutAddr := strings.TrimSpace(intent.Metadata["swap_token_out"])
+	if tokenInAddr == "" || tokenOutAddr == "" || !common.IsHexAddress(tokenInAddr) || !common.IsHexAddress(tokenOutAddr) {
+		return fmt.Errorf("swap_token_in/out missing/invalid")
+	}
+
+	amtInStr := strings.TrimSpace(intent.Metadata["swap_amount_in"])
+	if amtInStr == "" {
+		return fmt.Errorf("swap_amount_in missing")
+	}
+	amountIn := new(big.Int)
+	if _, ok := amountIn.SetString(amtInStr, 10); !ok || amountIn.Sign() <= 0 {
+		return fmt.Errorf("invalid swap_amount_in: %q", amtInStr)
+	}
+
+	fee := uint32(poolCfg.Fee)
+	if fee == 0 {
+		if feeStr := strings.TrimSpace(intent.Metadata["swap_fee"]); feeStr != "" {
+			if v, err := strconv.ParseUint(feeStr, 10, 32); err == nil {
+				fee = uint32(v)
+			}
+		}
+	}
+	if fee == 0 {
+		return fmt.Errorf("swap fee missing (pools[0].fee or metadata swap_fee)")
+	}
+
+	slippageBps := uint32(100) // 1%
+	if bpsStr := strings.TrimSpace(intent.Metadata["swap_slippage_bps"]); bpsStr != "" {
+		if v, err := strconv.ParseUint(bpsStr, 10, 32); err == nil {
+			slippageBps = uint32(v)
+		}
+	} else if envBps := strings.TrimSpace(os.Getenv("PHOENIX_SWAP_SLIPPAGE_BPS")); envBps != "" {
+		if v, err := strconv.ParseUint(envBps, 10, 32); err == nil {
+			slippageBps = uint32(v)
+		}
+	}
+
+	amountOutMinimum := big.NewInt(0)
+	if quoterAddr != "" && common.IsHexAddress(quoterAddr) {
+		ctx, cancel := context.WithTimeout(parent, univ3.DefaultQuoterTimeout)
+		defer cancel()
+		c, err := ethclient.DialContext(ctx, chain.RPC)
+		if err != nil {
+			return fmt.Errorf("dial rpc for quoter: %w", err)
+		}
+		q, err := univ3.NewQuoter(quoterAddr)
+		if err != nil {
+			return err
+		}
+		out, method, err := q.QuoteExactInputWithFallback(
+			ctx,
+			ethClientCaller{c: c},
+			common.HexToAddress(tokenInAddr),
+			common.HexToAddress(tokenOutAddr),
+			fee,
+			amountIn,
+		)
+		if err != nil {
+			if requireQuoter {
+				return fmt.Errorf("quoter quote failed: %w", err)
+			}
+			log.Printf("[Swap] quoter quote failed (continuing with amountOutMinimum=0): %v", err)
+		} else {
+			minOut, err := univ3.ComputeMinOutBps(out, slippageBps)
+			if err != nil {
+				return err
+			}
+			amountOutMinimum = minOut
+			intent.Metadata["swap_quote_method"] = method
+			intent.Metadata["swap_quote_amount_out"] = out.String()
+			intent.Metadata["swap_amount_out_minimum"] = minOut.String()
+		}
+	} else if requireQuoter {
+		return fmt.Errorf("PHOENIX_SWAP_REQUIRE_QUOTER=1 but quoter address invalid: %q", quoterAddr)
+	}
+
+	swapHelper, err := univ3.NewSwapHelper(swapHelperAddr)
+	if err != nil {
+		return err
+	}
+	data, err := swapHelper.BuildSwapExactInputSingleMinOutData(
+		common.HexToAddress(swapPoolAddr),
+		common.HexToAddress(tokenInAddr),
+		common.HexToAddress(tokenOutAddr),
+		amountIn,
+		amountOutMinimum,
+		big.NewInt(0),
+	)
+	if err != nil {
+		return err
+	}
+
+	intent.Metadata["target"] = swapHelper.Address.Hex()
+	intent.Metadata["calldata"] = hex.EncodeToString(data)
+	intent.Metadata["value"] = "0"
+	intent.Metadata["swap_helper"] = swapHelper.Address.Hex()
+	intent.Metadata["swap_slippage_bps_effective"] = fmt.Sprintf("%d", slippageBps)
+	log.Printf(
+		"[Swap] prepared swapExactInputSingleMinOut pool=%s tokenIn=%s tokenOut=%s amountIn=%s amountOutMinimum=%s helper=%s quoteMethod=%s",
+		swapPoolAddr,
+		tokenInAddr,
+		tokenOutAddr,
+		amountIn.String(),
+		amountOutMinimum.String(),
+		swapHelper.Address.Hex(),
+		intent.Metadata["swap_quote_method"],
+	)
+	return nil
+}
+
+func parseAddressAllowlist(envKey string) map[string]struct{} {
+	raw := strings.TrimSpace(os.Getenv(envKey))
+	if raw == "" {
+		return nil
+	}
+	m := make(map[string]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		s := strings.ToLower(strings.TrimSpace(part))
+		if s == "" {
+			continue
+		}
+		if !common.IsHexAddress(s) {
+			continue
+		}
+		m[common.HexToAddress(s).Hex()] = struct{}{}
+	}
+	return m
+}
+
+func enforceSwapPolicy(cfg *config.AppConfig, intent *strategy.Intent) error {
+	// Enforce only for swap intents.
+	if intent == nil || (intent.Type != contracts.IntentSwap && strings.ToLower(strings.TrimSpace(intent.Metadata["action"])) != "swap_exact_in") {
+		return nil
+	}
+
+	meta := intent.Metadata
+	if meta == nil {
+		meta = map[string]string{}
+		intent.Metadata = meta
+	}
+
+	swapPoolAddr := strings.TrimSpace(meta["swap_pool"])
+	tokenInAddr := strings.TrimSpace(meta["swap_token_in"])
+	tokenOutAddr := strings.TrimSpace(meta["swap_token_out"])
+	amtInStr := strings.TrimSpace(meta["swap_amount_in"])
+	if swapPoolAddr == "" || tokenInAddr == "" || tokenOutAddr == "" || amtInStr == "" {
+		return fmt.Errorf("swap requires swap_pool, swap_token_in, swap_token_out, swap_amount_in")
+	}
+
+	amountIn := new(big.Int)
+	if _, ok := amountIn.SetString(amtInStr, 10); !ok || amountIn.Sign() <= 0 {
+		return fmt.Errorf("invalid swap_amount_in: %q", amtInStr)
+	}
+
+	// Require an explicit confirmation string when broadcasting (or when forced).
+	forceConfirm := os.Getenv("PHOENIX_SWAP_FORCE_CONFIRM") == "1"
+	if cfg != nil && cfg.Strategy.DryRun {
+		// dry-run mode: confirm optional unless forced
+	} else {
+		forceConfirm = true
+	}
+	if forceConfirm {
+		want := os.Getenv("PHOENIX_SWAP_CONFIRM_STRING")
+		if want == "" {
+			want = "I_UNDERSTAND_TESTNET_SWAP"
+		}
+		if strings.TrimSpace(meta["swap_confirm"]) != want {
+			return fmt.Errorf("swap_confirm required (set metadata.swap_confirm=%s)", want)
+		}
+	}
+
+	if maxStr := strings.TrimSpace(os.Getenv("PHOENIX_SWAP_MAX_AMOUNT_IN")); maxStr != "" {
+		maxAmt := new(big.Int)
+		if _, ok := maxAmt.SetString(maxStr, 10); ok && maxAmt.Sign() > 0 {
+			if amountIn.Cmp(maxAmt) > 0 {
+				return fmt.Errorf("swap_amount_in %s exceeds PHOENIX_SWAP_MAX_AMOUNT_IN %s", amountIn.String(), maxAmt.String())
+			}
+		}
+	}
+
+	if maxSlippageStr := strings.TrimSpace(os.Getenv("PHOENIX_SWAP_MAX_SLIPPAGE_BPS")); maxSlippageStr != "" {
+		if v, err := strconv.ParseUint(maxSlippageStr, 10, 32); err == nil {
+			wantMax := uint32(v)
+			if bpsStr := strings.TrimSpace(meta["swap_slippage_bps"]); bpsStr != "" {
+				if cur, err := strconv.ParseUint(bpsStr, 10, 32); err == nil {
+					if uint32(cur) > wantMax {
+						return fmt.Errorf("swap_slippage_bps %d exceeds PHOENIX_SWAP_MAX_SLIPPAGE_BPS %d", cur, wantMax)
+					}
+				}
+			}
+		}
+	}
+
+	// Optional allowlists.
+	if pools := parseAddressAllowlist("PHOENIX_SWAP_ALLOWLIST_POOLS"); pools != nil {
+		if !common.IsHexAddress(swapPoolAddr) {
+			return fmt.Errorf("invalid swap_pool: %q", swapPoolAddr)
+		}
+		if _, ok := pools[common.HexToAddress(swapPoolAddr).Hex()]; !ok {
+			return fmt.Errorf("swap_pool not allowlisted")
+		}
+	}
+	if toks := parseAddressAllowlist("PHOENIX_SWAP_ALLOWLIST_TOKENS"); toks != nil {
+		if !common.IsHexAddress(tokenInAddr) || !common.IsHexAddress(tokenOutAddr) {
+			return fmt.Errorf("invalid swap_token_in/out")
+		}
+		if _, ok := toks[common.HexToAddress(tokenInAddr).Hex()]; !ok {
+			return fmt.Errorf("swap_token_in not allowlisted")
+		}
+		if _, ok := toks[common.HexToAddress(tokenOutAddr).Hex()]; !ok {
+			return fmt.Errorf("swap_token_out not allowlisted")
+		}
+	}
+	return nil
 }

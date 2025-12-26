@@ -2,7 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"log"
+	"math/big"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"phoenix-v3/internal/feed"
@@ -13,23 +20,74 @@ type Server struct {
 	queue   *strategy.IntentQueue
 	lastCEX *feed.Ticker
 	status  *SystemStatus
+	pnl     *PnLSnapshot
+	alerts  []Alert
+	mux     *http.ServeMux
+
+	market *feed.PriceAggregator
+
+	decisionMu sync.RWMutex
+	decision   DecisionStatus
 }
 
 type SystemStatus struct {
-	Healthy     bool      `json:"healthy"`
-	LastUpdate  time.Time `json:"last_update"`
-	EngineState string    `json:"engine_state"`
+	Healthy          bool      `json:"healthy"`
+	LastUpdate       time.Time `json:"last_update"`
+	EngineState      string    `json:"engine_state"`
+	BinanceConnected bool      `json:"binance_connected"`
+	PriceSource      string    `json:"price_source"`
 }
 
-func NewServer(q *strategy.IntentQueue) *Server {
+type DecisionStatus struct {
+	Enabled     bool   `json:"enabled"`
+	Blocked     bool   `json:"blocked"`
+	BlockReason string `json:"block_reason"`
+}
+
+type PnLSnapshot struct {
+	UpdatedAt        time.Time `json:"updated_at"`
+	PortfolioUSD     float64   `json:"portfolio_usd"`
+	BaselineUSD      float64   `json:"baseline_usd"`
+	TotalBaselineUSD float64   `json:"total_baseline_usd"`
+	DailyGasUSD      float64   `json:"daily_gas_usd"`
+	TotalGasUSD      float64   `json:"total_gas_usd"`
+	DailyPnLUSD      float64   `json:"daily_pnl_usd"`
+	TotalPnLUSD      float64   `json:"total_pnl_usd"`
+	TradesCount24h   int       `json:"trades_count_24h"`
+}
+
+type Alert struct {
+	Key       string    `json:"key"`
+	Severity  string    `json:"severity"` // info|warn|critical
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type ServerConfig struct {
+	BinanceConnected bool
+	PriceSource      string
+}
+
+func NewServerWithConfig(q *strategy.IntentQueue, cfg ServerConfig) *Server {
 	return &Server{
 		queue: q,
 		status: &SystemStatus{
-			Healthy:     true,
-			LastUpdate:  time.Now(),
-			EngineState: "Running",
+			Healthy:          true,
+			LastUpdate:       time.Now(),
+			EngineState:      "Running",
+			BinanceConnected: cfg.BinanceConnected,
+			PriceSource:      cfg.PriceSource,
 		},
+		decision: DecisionStatus{Enabled: true},
+		mux:      http.NewServeMux(),
 	}
+}
+
+func NewServer(q *strategy.IntentQueue) *Server {
+	return NewServerWithConfig(q, ServerConfig{
+		BinanceConnected: false,
+		PriceSource:      "Fallback",
+	})
 }
 
 // UpdateCEXPrice updates the internal state for serving
@@ -38,19 +96,44 @@ func (s *Server) UpdateCEXPrice(t feed.Ticker) {
 	s.status.LastUpdate = time.Now()
 }
 
+func (s *Server) SetMarketAggregator(market *feed.PriceAggregator) {
+	s.market = market
+}
+
+func (s *Server) UpdateDecision(decision DecisionStatus) {
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+	s.decision = decision
+}
+
+func (s *Server) UpdatePnL(p PnLSnapshot) {
+	s.pnl = &p
+}
+
+func (s *Server) UpdateAlerts(alerts []Alert) {
+	s.alerts = alerts
+}
+
 func (s *Server) Start(port string) {
 	// CORS middleware
 	cors := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,X-Admin-Token")
 			next(w, r)
 		}
 	}
 
-	http.HandleFunc("/api/status", cors(s.handleStatus))
-	http.HandleFunc("/api/intents", cors(s.handleIntents))
+	s.mux.HandleFunc("/api/status", cors(s.handleStatus))
+	s.mux.HandleFunc("/api/intents", cors(s.handleIntents))
+	s.mux.HandleFunc("/api/intents/enqueue", cors(s.handleEnqueueIntent))
 
-	go http.ListenAndServe(":"+port, nil)
+	log.Printf("API Server starting on :%s", port)
+	go func() {
+		if err := http.ListenAndServe(":"+port, s.mux); err != nil {
+			log.Printf("API Server failed: %v", err)
+		}
+	}()
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -59,14 +142,65 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		price = s.lastCEX.Price
 	}
 
-	resp := map[string]interface{}{
-		"system": s.status,
-		"market": map[string]interface{}{
+	var market map[string]any
+	var risk map[string]any
+	decision := s.currentDecision()
+	if s.market != nil {
+		snap := s.market.Snapshot()
+		// Keep legacy fields in `system` somewhat truthful.
+		s.status.BinanceConnected = false
+		s.status.PriceSource = "WS"
+		for _, src := range snap.Sources {
+			if src.Name == "binance" && src.Connected {
+				s.status.BinanceConnected = true
+			}
+		}
+		market = map[string]any{
+			"agg_price":      snap.Aggregate.AggPrice,
+			"agg_updated_at": snap.Aggregate.AggUpdatedAt,
+			"stale":          snap.Aggregate.Stale,
+			"stale_age_ms":   snap.Aggregate.StaleAgeMs,
+			"confidence":     snap.Aggregate.Confidence,
+			"divergence_pct": snap.Aggregate.DivergencePct,
+			"sources":        snap.Sources,
+			"symbol":         snap.Symbol,
+		}
+		risk = map[string]any{
+			"mode":   snap.Risk.Mode,
+			"reason": snap.Risk.Reason,
+		}
+	} else {
+		market = map[string]any{
 			"price":  price,
 			"symbol": "ETH/USDT",
-		},
+		}
+		risk = map[string]any{
+			"mode":   "unknown",
+			"reason": "no_market_aggregator",
+		}
+	}
+
+	resp := map[string]interface{}{
+		"system":   s.status,
+		"market":   market,
+		"risk":     risk,
+		"decision": decision,
+		"pnl":      s.pnl,
+		"alerts":   s.alerts,
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) currentDecision() DecisionStatus {
+	enabled := os.Getenv("PHOENIX_MANUAL_ONLY") != "1"
+	if !enabled {
+		return DecisionStatus{Enabled: false, Blocked: true, BlockReason: "manual_only"}
+	}
+	if s.market == nil {
+		return DecisionStatus{Enabled: true, Blocked: false, BlockReason: ""}
+	}
+	blocked, reason, _, _ := s.market.GetGate(time.Now())
+	return DecisionStatus{Enabled: true, Blocked: blocked, BlockReason: reason}
 }
 
 func (s *Server) handleIntents(w http.ResponseWriter, r *http.Request) {
@@ -76,4 +210,201 @@ func (s *Server) handleIntents(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]int{
 		"pending_count": count,
 	})
+}
+
+type enqueueIntentRequest struct {
+	ID              string            `json:"id"`
+	Type            string            `json:"type"`
+	PoolID          string            `json:"pool_id"`
+	ChainID         int64             `json:"chain_id"`
+	Urgency         int               `json:"urgency"`
+	StrategyVersion string            `json:"strategy_version"`
+	RiskMode        string            `json:"risk_mode"`
+	Metadata        map[string]string `json:"metadata"`
+}
+
+func (s *Server) handleEnqueueIntent(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	adminToken := os.Getenv("ADMIN_TOKEN")
+	if adminToken == "" {
+		http.Error(w, "ADMIN_TOKEN not set on server", http.StatusForbidden)
+		return
+	}
+	if tok := r.Header.Get("X-Admin-Token"); tok == "" || tok != adminToken {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var req enqueueIntentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	intent, err := normalizeIntent(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.queue.Enqueue(intent)
+	json.NewEncoder(w).Encode(map[string]any{
+		"ok":       true,
+		"intentId": intent.ID,
+	})
+}
+
+func normalizeIntent(req enqueueIntentRequest) (strategy.Intent, error) {
+	if req.ChainID == 0 {
+		return strategy.Intent{}, errors.New("chain_id required")
+	}
+	if strings.TrimSpace(req.Type) == "" {
+		return strategy.Intent{}, errors.New("type required")
+	}
+	if strings.TrimSpace(req.PoolID) == "" {
+		return strategy.Intent{}, errors.New("pool_id required")
+	}
+	if req.Urgency == 0 {
+		req.Urgency = 5
+	}
+	if req.Metadata == nil {
+		req.Metadata = map[string]string{}
+	}
+
+	if strings.ToLower(strings.TrimSpace(req.Type)) == "swap" || strings.ToLower(strings.TrimSpace(req.Metadata["action"])) == "swap_exact_in" {
+		// Minimal required metadata for swapExactInputSingleMinOut builder in cmd/bot.
+		for _, k := range []string{"swap_token_in", "swap_token_out", "swap_amount_in", "swap_pool"} {
+			if strings.TrimSpace(req.Metadata[k]) == "" {
+				return strategy.Intent{}, errors.New("swap metadata missing: " + k)
+			}
+		}
+		if err := validateSwapPolicy(req.Metadata); err != nil {
+			return strategy.Intent{}, err
+		}
+		req.Metadata["action"] = "swap_exact_in"
+	}
+
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		id = "api-" + time.Now().UTC().Format("20060102T150405.000Z")
+	}
+
+	return strategy.Intent{
+		ID:              id,
+		Type:            strategy.IntentType(req.Type),
+		PoolID:          req.PoolID,
+		ChainID:         req.ChainID,
+		Urgency:         req.Urgency,
+		Deadline:        time.Now().Add(10 * time.Minute),
+		StrategyVersion: req.StrategyVersion,
+		RiskMode:        req.RiskMode,
+		Metadata:        req.Metadata,
+	}, nil
+}
+
+func parseAddressAllowlistEnv(envKey string) map[string]struct{} {
+	raw := strings.TrimSpace(os.Getenv(envKey))
+	if raw == "" {
+		return nil
+	}
+	m := make(map[string]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		s := strings.ToLower(strings.TrimSpace(part))
+		if s == "" {
+			continue
+		}
+		// avoid bringing in go-ethereum/common just for this; accept 0x + 40 hex chars
+		if len(s) != 42 || !strings.HasPrefix(s, "0x") {
+			continue
+		}
+		ok := true
+		for _, ch := range s[2:] {
+			if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
+				continue
+			}
+			ok = false
+			break
+		}
+		if !ok {
+			continue
+		}
+		// normalize casing: keep 0x + lower
+		m["0x"+s[2:]] = struct{}{}
+	}
+	return m
+}
+
+func validateSwapPolicy(meta map[string]string) error {
+	if meta == nil {
+		return errors.New("swap metadata missing")
+	}
+
+	swapPool := strings.ToLower(strings.TrimSpace(meta["swap_pool"]))
+	tokenIn := strings.ToLower(strings.TrimSpace(meta["swap_token_in"]))
+	tokenOut := strings.ToLower(strings.TrimSpace(meta["swap_token_out"]))
+	amtInStr := strings.TrimSpace(meta["swap_amount_in"])
+	if swapPool == "" || tokenIn == "" || tokenOut == "" || amtInStr == "" {
+		return errors.New("swap requires swap_pool, swap_token_in, swap_token_out, swap_amount_in")
+	}
+
+	amountIn := new(big.Int)
+	if _, ok := amountIn.SetString(amtInStr, 10); !ok || amountIn.Sign() <= 0 {
+		return errors.New("invalid swap_amount_in")
+	}
+
+	// Confirm gate (opt-in via env; runtime will also enforce on broadcast).
+	if os.Getenv("PHOENIX_SWAP_FORCE_CONFIRM") == "1" {
+		want := os.Getenv("PHOENIX_SWAP_CONFIRM_STRING")
+		if want == "" {
+			want = "I_UNDERSTAND_TESTNET_SWAP"
+		}
+		if strings.TrimSpace(meta["swap_confirm"]) != want {
+			return errors.New("swap_confirm required (set metadata.swap_confirm=" + want + ")")
+		}
+	}
+
+	if maxStr := strings.TrimSpace(os.Getenv("PHOENIX_SWAP_MAX_AMOUNT_IN")); maxStr != "" {
+		maxAmt := new(big.Int)
+		if _, ok := maxAmt.SetString(maxStr, 10); ok && maxAmt.Sign() > 0 {
+			if amountIn.Cmp(maxAmt) > 0 {
+				return errors.New("swap_amount_in exceeds PHOENIX_SWAP_MAX_AMOUNT_IN")
+			}
+		}
+	}
+
+	if maxSlippageStr := strings.TrimSpace(os.Getenv("PHOENIX_SWAP_MAX_SLIPPAGE_BPS")); maxSlippageStr != "" {
+		if v, err := strconv.ParseUint(maxSlippageStr, 10, 32); err == nil {
+			wantMax := uint32(v)
+			if bpsStr := strings.TrimSpace(meta["swap_slippage_bps"]); bpsStr != "" {
+				if cur, err := strconv.ParseUint(bpsStr, 10, 32); err == nil {
+					if uint32(cur) > wantMax {
+						return errors.New("swap_slippage_bps exceeds PHOENIX_SWAP_MAX_SLIPPAGE_BPS")
+					}
+				}
+			}
+		}
+	}
+
+	if pools := parseAddressAllowlistEnv("PHOENIX_SWAP_ALLOWLIST_POOLS"); pools != nil {
+		if _, ok := pools[swapPool]; !ok {
+			return errors.New("swap_pool not allowlisted")
+		}
+	}
+	if toks := parseAddressAllowlistEnv("PHOENIX_SWAP_ALLOWLIST_TOKENS"); toks != nil {
+		if _, ok := toks[tokenIn]; !ok {
+			return errors.New("swap_token_in not allowlisted")
+		}
+		if _, ok := toks[tokenOut]; !ok {
+			return errors.New("swap_token_out not allowlisted")
+		}
+	}
+
+	return nil
 }

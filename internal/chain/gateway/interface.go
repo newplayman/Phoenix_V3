@@ -1,31 +1,19 @@
 package gateway
 
-import (
-	"context"
+import "phoenix-v3/internal/contracts"
 
-	"phoenix-v3/internal/strategy"
-
-	"github.com/ethereum/go-ethereum/common"
+type (
+	TxStatus = contracts.TxStatus
+	TxResult = contracts.TxResult
+	Gateway  = contracts.Gateway
 )
-
-type TxStatus string
 
 const (
-	StatusCreated     TxStatus = "created"
-	StatusSigned      TxStatus = "signed"
-	StatusBroadcasted TxStatus = "broadcasted"
-	StatusPending     TxStatus = "pending"
-	StatusMined       TxStatus = "mined"
-	StatusReverted    TxStatus = "reverted"
-	StatusDropped     TxStatus = "dropped"
+	StatusCreated     = contracts.StatusCreated
+	StatusSigned      = contracts.StatusSigned
+	StatusBroadcasted = contracts.StatusBroadcasted
+	StatusPending     = contracts.StatusPending
+	StatusMined       = contracts.StatusMined
+	StatusReverted    = contracts.StatusReverted
+	StatusDropped     = contracts.StatusDropped
 )
-
-type TxResult struct {
-	Hash   common.Hash
-	Status TxStatus
-	Error  error
-}
-
-type Gateway interface {
-	Send(ctx context.Context, intent strategy.Intent) (*TxResult, error)
-}

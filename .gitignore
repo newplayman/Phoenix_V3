@@ -1,0 +1,26 @@
+# local env / secrets (do not commit)
+.env
+*.env
+.env.*
+secrets/
+tmp/
+*.pid
+*.log
+
+# local acceptance artifacts
+.check_price_health.*
+.evidence.*
+.health.*
+.probe.*
+.short.*
+.tmp_*.log
+
+# build outputs
+bin/
+dist/
+web/dist/
+*.out
+
+# node
+web/node_modules/
+

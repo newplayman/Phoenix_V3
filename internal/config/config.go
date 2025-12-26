@@ -29,10 +29,12 @@ type EventConfig struct {
 }
 
 type ChainConfig struct {
-	ID      int64  `yaml:"id"`
-	Name    string `yaml:"name"`
-	RPC     string `yaml:"rpc"`
-	PrivKey string `yaml:"-"` // Loaded from env
+	ID                int64  `yaml:"id"`
+	Name              string `yaml:"name"`
+	RPC               string `yaml:"rpc"`
+	QuoterAddress     string `yaml:"quoter_address"`
+	SwapHelperAddress string `yaml:"swap_helper_address"`
+	PrivKey           string `yaml:"-"` // Loaded from env
 }
 
 type PoolConfig struct {

@@ -13,8 +13,19 @@
 cd phoenix-v3
 
 # 2. 配置私钥 / 数据库
+# 注：当 `strategy.dry_run=true` 时可不设置 `BOT_PRIVATE_KEY`（Bot 不会广播交易，仅跑行情/策略/门禁与 API）。
 export BOT_PRIVATE_KEY="0xYOUR_TESTNET_KEY"
 # 可选：export SUPABASE_DB_URL="postgres://USER:PASSWORD@HOST:5432/postgres?sslmode=require"
+
+# 行情（WebSocket 双源聚合，默认 ETH/USDT）
+# - PRICE_SYMBOL: 默认 ETH/USDT
+# - PRICE_STALE_SEC: 默认 5（超过则 decision 被熔断）
+# - PRICE_FREEZE_SEC: 默认 20（超过则 risk.mode=frozen，执行端拒绝所有 intent）
+# - DIVERGENCE_PCT: 默认 0.003（0.3%，两源偏差超过则 risk.mode=degraded）
+# - PRICE_MODE: 默认 ws_only；可选 ws_with_rest_fallback（显式开启旧 Binance/CoinGecko 轮询作为 fallback）
+
+# 安全：强制 dry_run（即使 config.yaml 设置为 false）
+# export PHOENIX_FORCE_DRY_RUN=1
 
 # 3. 编译项目
 go build -o bot ./cmd/bot/main.go
@@ -42,6 +53,83 @@ Executing Intent intent-xxx [DryRun=true]
 ```
 
 无需重启即可调整 `dry_run`、策略参数或风控阈值（风险模块会即时更新最大 Gas / 回撤限制）。
+
+### 受保护 Swap（Quoter 计算 minOut）
+
+Phoenix 支持通过 API 注入一个 `swap` Intent，并由 Bot 自动使用链上 Quoter 报价计算 `amountOutMinimum`，最终把交易 calldata 组装成 `SwapHelper.swapExactInputSingleMinOut(...)`（在链上强制 `amountOut >= amountOutMinimum`）。
+
+前提条件：
+- `ADMIN_TOKEN`：用于调用 `/api/intents/enqueue`（请求头 `X-Admin-Token`）。
+- `PHOENIX_SWAP_HELPER_ADDRESS`：你部署在目标链上的 `SwapHelper` 合约地址。
+- 可选安全开关：`PHOENIX_SWAP_REQUIRE_QUOTER=1`（Quoter 失败则拒绝执行；不允许 `amountOutMinimum=0` 回退）。
+- 广播安全闸（建议开启）：
+  - `PHOENIX_MANUAL_ONLY=1`：禁用自动策略循环，只执行你注入的 intent
+  - `PHOENIX_SWAP_MAX_AMOUNT_IN`：最大允许的 `swap_amount_in`（整数）
+  - `PHOENIX_SWAP_ALLOWLIST_POOLS`：允许的 pool 地址（逗号分隔）
+  - `PHOENIX_SWAP_ALLOWLIST_TOKENS`：允许的 token 地址（逗号分隔，in/out 都必须在列表里）
+  - `PHOENIX_SWAP_MAX_SLIPPAGE_BPS`：最大允许滑点 bps
+  - `PHOENIX_SWAP_CONFIRM_STRING`：确认字符串（默认 `I_UNDERSTAND_TESTNET_SWAP`）
+- 推荐：使用 `PHOENIX_CONFIG=configs/config_arbitrum_sepolia.yaml`（示例 Arbitrum Sepolia 配置），并设置 `API_PORT=18081`。
+
+示例（dry-run 推荐先开）：
+
+```bash
+export PHOENIX_CONFIG=configs/config_arbitrum_sepolia.yaml
+export API_PORT=18081
+export ADMIN_TOKEN=yourtoken
+export BOT_PRIVATE_KEY=0x...
+export PHOENIX_SWAP_HELPER_ADDRESS=0x...
+export PHOENIX_SWAP_SLIPPAGE_BPS=100   # 1%
+export PHOENIX_MANUAL_ONLY=1
+export PHOENIX_SWAP_MAX_AMOUNT_IN=2000000
+export PHOENIX_SWAP_ALLOWLIST_POOLS=0x53448a5c2c61da7A797f25cEd6d11BE838E674Fb
+export PHOENIX_SWAP_ALLOWLIST_TOKENS=0xF8BFc8301BfcC32862BdaC962a8C34c7ED13E51E,0x1b46aA4C362788E3b2557CE465487d9E41742Fd9
+export PHOENIX_SWAP_MAX_SLIPPAGE_BPS=200
+
+./bot
+```
+
+推荐（避免手动 export，减少误操作）：
+
+```bash
+cp scripts/secrets_template.sh ~/.config/phoenix/secrets.sh
+chmod 600 ~/.config/phoenix/secrets.sh
+${EDITOR:-vi} ~/.config/phoenix/secrets.sh
+
+SECRETS_FILE=~/.config/phoenix/secrets.sh scripts/run_bot_arbitrum_sepolia_safe.sh
+```
+
+注入 swap intent（示例 TRL/USDT on Arbitrum Sepolia）：
+
+```bash
+curl -sS -X POST "http://127.0.0.1:18081/api/intents/enqueue" \
+  -H 'Content-Type: application/json' \
+  -H "X-Admin-Token: $ADMIN_TOKEN" \
+  --data '{
+    "type":"swap",
+    "pool_id":"arbsepolia-trl-usdt-3000",
+    "chain_id":421614,
+    "urgency":9,
+    "metadata":{
+      "action":"swap_exact_in",
+      "swap_pool":"0x53448a5c2c61da7A797f25cEd6d11BE838E674Fb",
+      "swap_token_in":"0xF8BFc8301BfcC32862BdaC962a8C34c7ED13E51E",
+      "swap_token_out":"0x1b46aA4C362788E3b2557CE465487d9E41742Fd9",
+      "swap_amount_in":"1000000",
+      "swap_slippage_bps":"100",
+      "swap_confirm":"I_UNDERSTAND_TESTNET_SWAP"
+    }
+  }'
+```
+
+说明：
+- 当设置 `PHOENIX_SWAP_FORCE_CONFIRM=1` 时，API 会在入队前直接拒绝缺少/错误的 `swap_confirm`（避免进入队列后才被 Bot 拦截）。
+
+推荐使用脚本注入（自动补齐 `swap_confirm`）：
+
+```bash
+SECRETS_FILE=~/.config/phoenix/secrets.sh API_PORT=18081 scripts/enqueue_swap_arbsepolia_trl_usdt.sh
+```
 
 ### 数据库（Supabase 接入可选）
 
@@ -299,8 +387,17 @@ go run ./cmd/bot
 ### 7.5 监控与审计
 
 - `curl http://localhost:8080/healthz`：检查 feed/dexstate/monitor 状态。
-- Supabase：`SELECT * FROM trade_records ORDER BY time DESC LIMIT 20;` 即可验证 `status` 和 `tx_hash`。
+- Supabase：`SELECT * FROM trade_records ORDER BY time DESC LIMIT 20;` 即可验证 `status`、`tx_hash` 以及 `meta_json`（swap/minOut/calldata/approve 等审计信息）。
 - 事件流：如切换 `events.driver=redis`，可用 `cmd/replay` 验证 deterministic replay。
+
+#### PnL（估值版）与告警（本地）
+
+- `GET /api/status` 返回 `pnl.portfolio_usd / pnl.daily_pnl_usd / pnl.total_pnl_usd`（基于钱包资产估值 + gas 成本）。
+- 常用环境变量：
+  - `PHOENIX_STABLE_TOKENS=0xTokenA,0xTokenB`：标记稳定币按 $1 估值（脚本默认包含 Arb Sepolia USDT）。
+  - `PHOENIX_PRICE_USD_OVERRIDES=0xToken=1.23,0xOther=4.56`：对无法从池价推导的 token 提供固定 USD 价格。
+  - `PHOENIX_PNL_BASELINE_FILE=~/.config/phoenix/pnl_baseline.json`：日基线持久化位置（可覆盖）。
+  - `PHOENIX_PNL_RESET_BASELINE=1`：强制重置当日/总基线为当前资产估值（用于切换钱包或首次上线）。
 
 ### 7.6 常见问题
 

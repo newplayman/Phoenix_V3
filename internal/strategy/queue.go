@@ -3,6 +3,8 @@ package strategy
 import (
 	"container/heap"
 	"sync"
+
+	"phoenix-v3/internal/contracts"
 )
 
 // IntentQueue connects Strategy -> Gateway
@@ -21,7 +23,7 @@ func NewIntentQueue() *IntentQueue {
 	return iq
 }
 
-func (iq *IntentQueue) Push(intent Intent) {
+func (iq *IntentQueue) Enqueue(intent contracts.Intent) {
 	iq.mu.Lock()
 	defer iq.mu.Unlock()
 
@@ -29,7 +31,7 @@ func (iq *IntentQueue) Push(intent Intent) {
 	iq.cond.Signal()
 }
 
-func (iq *IntentQueue) Pop() Intent {
+func (iq *IntentQueue) Dequeue() contracts.Intent {
 	iq.mu.Lock()
 	defer iq.mu.Unlock()
 
@@ -37,7 +39,7 @@ func (iq *IntentQueue) Pop() Intent {
 		iq.cond.Wait()
 	}
 
-	item := heap.Pop(&iq.pq).(*Intent)
+	item := heap.Pop(&iq.pq).(*contracts.Intent)
 	return *item
 }
 
@@ -48,7 +50,7 @@ func (iq *IntentQueue) Len() int {
 }
 
 // PriorityQueue implementation
-type PriorityQueue []*Intent
+type PriorityQueue []*contracts.Intent
 
 func (pq PriorityQueue) Len() int { return len(pq) }
 
@@ -62,7 +64,7 @@ func (pq PriorityQueue) Swap(i, j int) {
 }
 
 func (pq *PriorityQueue) Push(x interface{}) {
-	item := x.(*Intent)
+	item := x.(*contracts.Intent)
 	*pq = append(*pq, item)
 }
 
