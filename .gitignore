@@ -24,3 +24,5 @@ web/dist/
 # node
 web/node_modules/
 
+# local v1 streams / control
+var/
