@@ -296,6 +296,11 @@ func (s *Server) currentDecision() DecisionStatus {
 	return out
 }
 
+func (s *Server) ContractV1StatusSnapshot() *contractv1.StatusV1 {
+	d := s.currentDecision()
+	return d.StatusV1
+}
+
 func (s *Server) buildStatusV1(decision DecisionStatus) *contractv1.StatusV1 {
 	s.contractV1Mu.RLock()
 	runID := s.contractV1RunID

@@ -38,6 +38,13 @@ import (
 	contractv1 "shared/contracts/contract/v1"
 )
 
+const (
+	contractV1MetaIntentID  = "contract_v1_intent_id"
+	contractV1MetaRunID     = "contract_v1_run_id"
+	contractV1MetaTsLocalMS = "contract_v1_ts_local_ms"
+	contractV1MetaTTLMS     = "contract_v1_ttl_ms"
+)
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -359,7 +366,7 @@ func main() {
 					riskLevelV1 = contractv1.RiskLevelDeny
 				}
 			}
-			apiServer.UpdateLastRiskV1(contractv1.RiskDecisionV1{
+			riskDecisionV1 := contractv1.RiskDecisionV1{
 				SchemaVersion: contractv1.SchemaVersion,
 				RunID:         runID,
 				TsLocalMS:     now.UnixMilli(),
@@ -367,7 +374,13 @@ func main() {
 				Reasons:       reasonsV1,
 				Fields:        fieldsV1,
 				CooldownMS:    0,
-			})
+			}
+			apiServer.UpdateLastRiskV1(riskDecisionV1)
+			if riskDecisionV1.Level != contractv1.RiskLevelSafe || autoEvalEnabled {
+				if b, err := json.Marshal(riskDecisionV1); err == nil {
+					log.Printf("[ContractV1] %s", string(b))
+				}
+			}
 
 			// Keep /api/status decision fields up-to-date even when auto-eval is disabled.
 			apiServer.UpdateDecision(api.DecisionStatus{
@@ -443,7 +456,8 @@ func main() {
 				action = res.Action
 				reason = res.Reason
 				if intent != nil {
-					intents = append(intents, *intent)
+					intentNow := time.Now()
+					ttlMS := int64(120_000)
 					lastIntentType = string(intent.Type)
 					lastIntentSummary = fmt.Sprintf("%s cur=[%d,%d] tick=%d new=[%d,%d]", reason, res.CurLower, res.CurUpper, res.CurrentTick, res.NewLower, res.NewUpper)
 					lastIntentFields = map[string]any{
@@ -461,10 +475,25 @@ func main() {
 					}
 
 					dryRunV1 := currentCfg.Strategy.DryRun || intent.Type == contracts.IntentRebalanceV3
-					intentV1 := strategy.ToIntentV1FromRebalance(*intent, time.Now(), dryRunV1)
+					intentV1 := strategy.ToIntentV1FromRebalance(*intent, runID, intentNow, dryRunV1, ttlMS)
+					if intent.Metadata == nil {
+						intent.Metadata = make(map[string]string, 8)
+					}
+					intent.Metadata[contractV1MetaIntentID] = intentV1.IntentID
+					intent.Metadata[contractV1MetaRunID] = runID
+					intent.Metadata[contractV1MetaTsLocalMS] = fmt.Sprintf("%d", intentV1.TsLocalMS)
+					intent.Metadata[contractV1MetaTTLMS] = fmt.Sprintf("%d", intentV1.TTLms)
+
+					intents = append(intents, *intent)
+
 					apiServer.UpdateLastIntentV1(intentV1)
 					if b, err := json.Marshal(intentV1); err == nil {
 						log.Printf("[ContractV1] %s", string(b))
+					}
+					if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+						if b, err := json.Marshal(st); err == nil {
+							log.Printf("[ContractV1] %s", string(b))
+						}
 					}
 				} else {
 					lastIntentType = ""
@@ -1063,22 +1092,167 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	if intent.Metadata == nil {
 		intent.Metadata = make(map[string]string)
 	}
+
+	v1IntentID := strings.TrimSpace(intent.Metadata[contractV1MetaIntentID])
+	if v1IntentID == "" {
+		v1IntentID = intent.ID
+	}
+	v1RunID := strings.TrimSpace(intent.Metadata[contractV1MetaRunID])
+	v1TsMS := parseMetadataInt64(intent.Metadata, contractV1MetaTsLocalMS)
+	v1TTLMS := parseMetadataInt64(intent.Metadata, contractV1MetaTTLMS)
+	nowMS := time.Now().UnixMilli()
+
+	if v1TTLMS > 0 && v1TsMS > 0 && nowMS-v1TsMS > v1TTLMS {
+		execV1 := contractv1.ExecutorResultV1{
+			SchemaVersion: contractv1.SchemaVersion,
+			IntentID:      v1IntentID,
+			TsLocalMS:     nowMS,
+			Status:        contractv1.ExecutionStatusSkipped,
+			ErrorKind:     contractv1.ErrorKindNone,
+			Receipt: map[string]any{
+				"skipped_reason":  "intent_expired",
+				"ts_local_ms":     v1TsMS,
+				"ttl_ms":          v1TTLMS,
+				"now_ms":          nowMS,
+				"would_broadcast": false,
+			},
+		}
+		if apiServer != nil {
+			apiServer.UpdateLastExecV1(execV1)
+		}
+		if b, err := json.Marshal(execV1); err == nil {
+			log.Printf("[ContractV1] %s", string(b))
+		}
+		if apiServer != nil {
+			if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+				if b, err := json.Marshal(st); err == nil {
+					log.Printf("[ContractV1] %s", string(b))
+				}
+			}
+		}
+		_ = v1RunID
+		return
+	}
 	if market != nil {
 		snap := market.Snapshot()
 		riskMode := strings.ToLower(strings.TrimSpace(snap.Risk.Mode))
 		if riskMode != "normal" {
 			log.Printf("[Decision] blocked reason=%s risk_mode=%s stale_age_ms=%d", snap.Risk.Reason, riskMode, snap.Aggregate.StaleAgeMs)
+			level := contractv1.RiskLevelDeny
+			switch riskMode {
+			case "degraded":
+				level = contractv1.RiskLevelPause
+			case "frozen":
+				level = contractv1.RiskLevelSafeMode
+			}
+			riskV1 := contractv1.RiskDecisionV1{
+				SchemaVersion: contractv1.SchemaVersion,
+				RunID:         v1RunID,
+				TsLocalMS:     nowMS,
+				Level:         level,
+				Reasons:       []string{fmt.Sprintf("market_risk_mode=%s reason=%s", riskMode, strings.TrimSpace(snap.Risk.Reason))},
+				Fields: map[string]string{
+					"risk_mode":    riskMode,
+					"gate_reason":  strings.TrimSpace(snap.Risk.Reason),
+					"stale_age_ms": fmt.Sprintf("%d", snap.Aggregate.StaleAgeMs),
+				},
+				CooldownMS: 0,
+			}
+			if apiServer != nil {
+				apiServer.UpdateLastRiskV1(riskV1)
+			}
+			if b, err := json.Marshal(riskV1); err == nil {
+				log.Printf("[ContractV1] %s", string(b))
+			}
+
+			execV1 := contractv1.ExecutorResultV1{
+				SchemaVersion: contractv1.SchemaVersion,
+				IntentID:      v1IntentID,
+				TsLocalMS:     nowMS,
+				Status:        contractv1.ExecutionStatusSkipped,
+				ErrorKind:     contractv1.ErrorKindNone,
+				Receipt: map[string]any{
+					"skipped_reason":  "risk_denied",
+					"risk_mode":       riskMode,
+					"gate_reason":     strings.TrimSpace(snap.Risk.Reason),
+					"stale_age_ms":    snap.Aggregate.StaleAgeMs,
+					"would_broadcast": false,
+				},
+			}
+			if apiServer != nil {
+				apiServer.UpdateLastExecV1(execV1)
+			}
+			if b, err := json.Marshal(execV1); err == nil {
+				log.Printf("[ContractV1] %s", string(b))
+			}
+			if apiServer != nil {
+				if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+					if b, err := json.Marshal(st); err == nil {
+						log.Printf("[ContractV1] %s", string(b))
+					}
+				}
+			}
 			return
 		}
 	}
 	if err := riskMgr.CanProceed(); err != nil {
 		log.Printf("[Risk] skip intent %s: %v", intent.ID, err)
+		execV1 := contractv1.ExecutorResultV1{
+			SchemaVersion: contractv1.SchemaVersion,
+			IntentID:      v1IntentID,
+			TsLocalMS:     nowMS,
+			Status:        contractv1.ExecutionStatusSkipped,
+			ErrorKind:     contractv1.ErrorKindNone,
+			Receipt: map[string]any{
+				"skipped_reason":  "risk_can_proceed_failed",
+				"error":           err.Error(),
+				"would_broadcast": false,
+			},
+		}
+		if apiServer != nil {
+			apiServer.UpdateLastExecV1(execV1)
+		}
+		if b, err := json.Marshal(execV1); err == nil {
+			log.Printf("[ContractV1] %s", string(b))
+		}
+		if apiServer != nil {
+			if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+				if b, err := json.Marshal(st); err == nil {
+					log.Printf("[ContractV1] %s", string(b))
+				}
+			}
+		}
 		return
 	}
 
 	check := guard.CheckPool(context.Background(), intent.PoolID, "0xTokenA", "0xTokenB")
 	if check.Risk == poolguard.RiskDanger {
 		log.Printf("[PoolGuard] block intent %s: %s", intent.ID, check.Reason)
+		execV1 := contractv1.ExecutorResultV1{
+			SchemaVersion: contractv1.SchemaVersion,
+			IntentID:      v1IntentID,
+			TsLocalMS:     nowMS,
+			Status:        contractv1.ExecutionStatusSkipped,
+			ErrorKind:     contractv1.ErrorKindNone,
+			Receipt: map[string]any{
+				"skipped_reason":  "poolguard_danger",
+				"reason":          check.Reason,
+				"would_broadcast": false,
+			},
+		}
+		if apiServer != nil {
+			apiServer.UpdateLastExecV1(execV1)
+		}
+		if b, err := json.Marshal(execV1); err == nil {
+			log.Printf("[ContractV1] %s", string(b))
+		}
+		if apiServer != nil {
+			if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+				if b, err := json.Marshal(st); err == nil {
+					log.Printf("[ContractV1] %s", string(b))
+				}
+			}
+		}
 		return
 	}
 
@@ -1096,6 +1270,30 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	if !isDryRun && intent.Type != contracts.IntentSwap && adapter == nil {
 		log.Printf("[IntentExecutor] skip intent %s (non-swap broadcast disabled without adapter)", intent.ID)
 		riskMgr.RecordFailure()
+		execV1 := contractv1.ExecutorResultV1{
+			SchemaVersion: contractv1.SchemaVersion,
+			IntentID:      v1IntentID,
+			TsLocalMS:     nowMS,
+			Status:        contractv1.ExecutionStatusSkipped,
+			ErrorKind:     contractv1.ErrorKindNone,
+			Receipt: map[string]any{
+				"skipped_reason":  "missing_adapter",
+				"would_broadcast": false,
+			},
+		}
+		if apiServer != nil {
+			apiServer.UpdateLastExecV1(execV1)
+		}
+		if b, err := json.Marshal(execV1); err == nil {
+			log.Printf("[ContractV1] %s", string(b))
+		}
+		if apiServer != nil {
+			if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+				if b, err := json.Marshal(st); err == nil {
+					log.Printf("[ContractV1] %s", string(b))
+				}
+			}
+		}
 		return
 	}
 
@@ -1133,7 +1331,7 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	}
 
 	if isDryRun || gw == nil {
-		txHash = "0xSIMULATED_" + intent.ID
+		txHash = "0xSIMULATED_" + v1IntentID
 		status = "simulated"
 		log.Println(">>> Dry Run: Simulated Tx Execution")
 		riskMgr.RecordSuccess()
@@ -1152,7 +1350,7 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 
 	execV1 := contractv1.ExecutorResultV1{
 		SchemaVersion: contractv1.SchemaVersion,
-		IntentID:      intent.ID,
+		IntentID:      v1IntentID,
 		TsLocalMS:     time.Now().UnixMilli(),
 		Status:        contractv1.ExecutionStatusSubmitted,
 		ErrorKind:     contractv1.ErrorKindNone,
@@ -1176,6 +1374,13 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	}
 	if b, err := json.Marshal(execV1); err == nil {
 		log.Printf("[ContractV1] %s", string(b))
+	}
+	if apiServer != nil {
+		if st := apiServer.ContractV1StatusSnapshot(); st != nil {
+			if b, err := json.Marshal(st); err == nil {
+				log.Printf("[ContractV1] %s", string(b))
+			}
+		}
 	}
 
 	record := &storage.TradeRecord{
@@ -1286,6 +1491,21 @@ func parseMetadataFloat(meta map[string]string, key string) float64 {
 		return 0
 	}
 	return f
+}
+
+func parseMetadataInt64(meta map[string]string, key string) int64 {
+	if meta == nil {
+		return 0
+	}
+	val, ok := meta[key]
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func buildTradeMetaJSON(intent strategy.Intent, txHash string, status string, isDryRun bool) string {

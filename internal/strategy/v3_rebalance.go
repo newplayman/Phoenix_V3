@@ -1,6 +1,8 @@
 package strategy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -371,7 +373,7 @@ func (s *V3RebalanceStrategy) LastIntentSummary() (typ string, brief string) {
 	return s.lastIntentType, s.lastIntentBrief
 }
 
-func ToIntentV1FromRebalance(intent contracts.Intent, now time.Time, dryRun bool) contractv1.IntentV1 {
+func ToIntentV1FromRebalance(intent contracts.Intent, runID string, now time.Time, dryRun bool, ttlMS int64) contractv1.IntentV1 {
 	reason := strings.TrimSpace(intent.Metadata["reason"])
 	currentTick, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["current_tick"]), 10, 64)
 	curLower, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["current_lower"]), 10, 64)
@@ -384,6 +386,9 @@ func ToIntentV1FromRebalance(intent contracts.Intent, now time.Time, dryRun bool
 	tickSpacing, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["tick_spacing"]), 10, 64)
 
 	summary := fmt.Sprintf("%s cur=[%d,%d] tick=%d new=[%d,%d]", reason, curLower, curUpper, currentTick, newLower, newUpper)
+
+	observedAt := strings.TrimSpace(intent.Metadata["observed_at"])
+	intentID := computeRebalanceIntentV1ID(runID, observedAt, reason, currentTick, curLower, curUpper, newLower, newUpper, newCenter)
 
 	params := map[string]any{
 		"pool":               intent.PoolID,
@@ -432,15 +437,43 @@ func ToIntentV1FromRebalance(intent contracts.Intent, now time.Time, dryRun bool
 
 	return contractv1.IntentV1{
 		SchemaVersion: contractv1.SchemaVersion,
-		IntentID:      intent.ID,
+		IntentID:      intentID,
 		IntentType:    contractv1.IntentTypeRebalanceV3,
 		TsLocalMS:     now.UnixMilli(),
 		DryRun:        dryRun,
-		TTLms:         0,
+		TTLms:         ttlMS,
 		Params:        params,
 		Fields:        fields,
 		Summary:       summary,
 	}
+}
+
+func computeRebalanceIntentV1ID(
+	runID string,
+	observedAt string,
+	reason string,
+	currentTick int64,
+	curLower int64,
+	curUpper int64,
+	newLower int64,
+	newUpper int64,
+	newCenter int64,
+) string {
+	base := fmt.Sprintf(
+		"run_id=%s|intent_type=%s|observed_at=%s|reason=%s|current_tick=%d|cur_lower=%d|cur_upper=%d|new_lower=%d|new_upper=%d|new_center=%d",
+		strings.TrimSpace(runID),
+		contractv1.IntentTypeRebalanceV3,
+		strings.TrimSpace(observedAt),
+		strings.TrimSpace(reason),
+		currentTick,
+		curLower,
+		curUpper,
+		newLower,
+		newUpper,
+		newCenter,
+	)
+	sum := sha256.Sum256([]byte(base))
+	return fmt.Sprintf("%s_%s_%s", strings.TrimSpace(runID), contractv1.IntentTypeRebalanceV3, hex.EncodeToString(sum[:8]))
 }
 
 func computeCenteredRange(currentTick, widthTicks, spacing int64) (lower, upper, center int64) {
