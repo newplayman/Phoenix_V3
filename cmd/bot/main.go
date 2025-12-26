@@ -33,6 +33,7 @@ import (
 	"phoenix-v3/internal/monitor"
 	"phoenix-v3/internal/poolguard"
 	"phoenix-v3/internal/risk"
+	contractv1 "phoenix-v3/internal/shared/contract/v1"
 	"phoenix-v3/internal/storage"
 	"phoenix-v3/internal/strategy"
 )
@@ -40,6 +41,8 @@ import (
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	runID := fmt.Sprintf("phoenix-%d", time.Now().UnixNano())
 
 	// 1. Load Configuration & watch for hot reload
 	configPath := os.Getenv("PHOENIX_CONFIG")
@@ -177,6 +180,7 @@ func main() {
 		BinanceConnected: isBinanceConnected,
 		PriceSource:      map[bool]string{true: "Binance", false: "Fallback"}[isBinanceConnected],
 	})
+	apiServer.SetContractV1RunID(runID)
 	apiServer.SetMarketAggregator(priceAgg)
 
 	// Initialize API with current price
@@ -309,6 +313,7 @@ func main() {
 			}
 
 		case <-queryTicker.C:
+			now := time.Now()
 			manualOnly := os.Getenv("PHOENIX_MANUAL_ONLY") == "1"
 			autoEvalEnabled := os.Getenv("PHOENIX_AUTO_EVAL") == "1" && !manualOnly
 
@@ -318,6 +323,13 @@ func main() {
 			gateReason := strings.TrimSpace(snap.Risk.Reason)
 			staleAgeMs := snap.Aggregate.StaleAgeMs
 
+			modeV1 := contractv1.ModeLive
+			currentCfg := cfgValue.Load().(*config.AppConfig)
+			if currentCfg.Strategy.DryRun {
+				modeV1 = contractv1.ModeDryRun
+			}
+			apiServer.SetContractV1Mode(modeV1)
+
 			decisionBlocked := manualOnly || riskMode != "normal"
 			blockReason := ""
 			if manualOnly {
@@ -325,6 +337,31 @@ func main() {
 			} else if riskMode != "normal" {
 				blockReason = gateReason
 			}
+
+			riskLevelV1 := contractv1.RiskLevelSafe
+			reasonsV1 := []string(nil)
+			if manualOnly {
+				riskLevelV1 = contractv1.RiskLevelPause
+				reasonsV1 = append(reasonsV1, "manual_only")
+			} else if riskMode != "normal" {
+				reasonsV1 = append(reasonsV1, fmt.Sprintf("market_risk_mode=%s reason=%s stale_age_ms=%d", riskMode, gateReason, staleAgeMs))
+				switch riskMode {
+				case "degraded":
+					riskLevelV1 = contractv1.RiskLevelPause
+				case "frozen":
+					riskLevelV1 = contractv1.RiskLevelSafeMode
+				default:
+					riskLevelV1 = contractv1.RiskLevelDeny
+				}
+			}
+			apiServer.UpdateLastRiskV1(contractv1.RiskDecisionV1{
+				SchemaVersion: contractv1.SchemaVersion,
+				RunID:         runID,
+				TsLocalMS:     now.UnixMilli(),
+				Level:         riskLevelV1,
+				Reasons:       reasonsV1,
+				CooldownMS:    0,
+			})
 
 			// Keep /api/status decision fields up-to-date even when auto-eval is disabled.
 			apiServer.UpdateDecision(api.DecisionStatus{
@@ -377,7 +414,6 @@ func main() {
 			action := "noop"
 			reason := "noop"
 
-			currentCfg := cfgValue.Load().(*config.AppConfig)
 			v3Cfg := strategy.LoadV3RebalanceConfig(currentCfg)
 			if v3Cfg.Enabled {
 				posState := v3Pos.Resolve(ctx, time.Now(), v3Cfg)
@@ -416,6 +452,13 @@ func main() {
 						"width_ticks":            res.WidthTicks,
 						"edge_buffer_ticks":      res.BufferTicks,
 						"cooldown_remaining_sec": res.CooldownLeft,
+					}
+
+					dryRunV1 := currentCfg.Strategy.DryRun || intent.Type == contracts.IntentRebalanceV3
+					intentV1 := strategy.ToIntentV1FromRebalance(*intent, time.Now(), dryRunV1)
+					apiServer.UpdateLastIntentV1(intentV1)
+					if b, err := json.Marshal(intentV1); err == nil {
+						log.Printf("[ContractV1] %s", string(b))
 					}
 				} else {
 					lastIntentType = ""
@@ -1010,7 +1053,7 @@ func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *str
 	}()
 }
 
-func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, _ *api.Server) {
+func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server) {
 	if intent.Metadata == nil {
 		intent.Metadata = make(map[string]string)
 	}
@@ -1099,6 +1142,34 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 			status = string(result.Status)
 			riskMgr.RecordSuccess()
 		}
+	}
+
+	execV1 := contractv1.ExecutorResultV1{
+		SchemaVersion: contractv1.SchemaVersion,
+		IntentID:      intent.ID,
+		TsLocalMS:     time.Now().UnixMilli(),
+		Status:        contractv1.ExecutionStatusSubmitted,
+		ErrorKind:     contractv1.ErrorKindNone,
+		Receipt: map[string]any{
+			"tx_hash":          txHash,
+			"simulated":        isDryRun || gw == nil,
+			"would_broadcast":  !(isDryRun || gw == nil),
+			"legacy_status":    status,
+			"legacy_intent_id": intent.ID,
+		},
+	}
+	if isDryRun || gw == nil {
+		execV1.Status = contractv1.ExecutionStatusSimulated
+		execV1.ErrorKind = contractv1.ErrorKindNone
+	} else if status == "failed" {
+		execV1.Status = contractv1.ExecutionStatusFailed
+		execV1.ErrorKind = contractv1.ErrorKindUnknown
+	}
+	if apiServer != nil {
+		apiServer.UpdateLastExecV1(execV1)
+	}
+	if b, err := json.Marshal(execV1); err == nil {
+		log.Printf("[ContractV1] %s", string(b))
 	}
 
 	record := &storage.TradeRecord{

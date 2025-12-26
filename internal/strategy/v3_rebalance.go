@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"phoenix-v3/internal/config"
 	"phoenix-v3/internal/contracts"
+	contractv1 "phoenix-v3/internal/shared/contract/v1"
 )
 
 type V3RebalanceConfig struct {
@@ -367,6 +369,77 @@ func (s *V3RebalanceStrategy) LastIntentSummary() (typ string, brief string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastIntentType, s.lastIntentBrief
+}
+
+func ToIntentV1FromRebalance(intent contracts.Intent, now time.Time, dryRun bool) contractv1.IntentV1 {
+	reason := strings.TrimSpace(intent.Metadata["reason"])
+	currentTick, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["current_tick"]), 10, 64)
+	curLower, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["current_lower"]), 10, 64)
+	curUpper, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["current_upper"]), 10, 64)
+	newLower, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["new_lower"]), 10, 64)
+	newUpper, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["new_upper"]), 10, 64)
+	newCenter, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["new_center_tick"]), 10, 64)
+	widthTicks, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["width_ticks"]), 10, 64)
+	edgeBufferTicks, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["edge_buffer_ticks"]), 10, 64)
+	tickSpacing, _ := strconv.ParseInt(strings.TrimSpace(intent.Metadata["tick_spacing"]), 10, 64)
+
+	summary := fmt.Sprintf("%s cur=[%d,%d] tick=%d new=[%d,%d]", reason, curLower, curUpper, currentTick, newLower, newUpper)
+
+	params := map[string]any{
+		"pool":               intent.PoolID,
+		"reason":             reason,
+		"observed_at":        strings.TrimSpace(intent.Metadata["observed_at"]),
+		"current_tick":       currentTick,
+		"tick_lower":         curLower,
+		"tick_upper":         curUpper,
+		"target_lower_tick":  newLower,
+		"target_upper_tick":  newUpper,
+		"target_center_tick": newCenter,
+		"width_ticks":        widthTicks,
+		"edge_buffer_ticks":  edgeBufferTicks,
+		"tick_spacing":       tickSpacing,
+	}
+	if v := strings.TrimSpace(intent.Metadata["agg_price"]); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			params["agg_price"] = fmt.Sprintf("%.8f", f)
+		}
+	}
+	if v := strings.TrimSpace(intent.Metadata["divergence_pct"]); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			params["divergence_pct"] = fmt.Sprintf("%.8f", f)
+		}
+	}
+	if v := strings.TrimSpace(intent.Metadata["stale_age_ms"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			params["stale_age_ms"] = n
+		}
+	}
+
+	fields := map[string]any{
+		"pool":          intent.PoolID,
+		"reason":        reason,
+		"current_tick":  currentTick,
+		"current_lower": curLower,
+		"current_upper": curUpper,
+		"new_lower":     newLower,
+		"new_upper":     newUpper,
+	}
+
+	// Embed a compact JSON snapshot of the original legacy intent for debugging/display (add-only field).
+	if b, err := json.Marshal(intent); err == nil {
+		fields["legacy_intent_json"] = string(b)
+	}
+
+	return contractv1.IntentV1{
+		SchemaVersion: contractv1.SchemaVersion,
+		IntentID:      intent.ID,
+		IntentType:    contractv1.IntentTypeRebalanceV3,
+		TsLocalMS:     now.UnixMilli(),
+		DryRun:        dryRun,
+		Params:        params,
+		Fields:        fields,
+		Summary:       summary,
+	}
 }
 
 func computeCenteredRange(currentTick, widthTicks, spacing int64) (lower, upper, center int64) {

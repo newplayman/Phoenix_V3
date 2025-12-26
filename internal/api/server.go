@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"phoenix-v3/internal/feed"
+	contractv1 "phoenix-v3/internal/shared/contract/v1"
 	"phoenix-v3/internal/strategy"
 )
 
@@ -28,6 +29,14 @@ type Server struct {
 
 	decisionMu sync.RWMutex
 	decision   DecisionStatus
+
+	contractV1Mu      sync.RWMutex
+	contractV1RunID   string
+	contractV1Mode    contractv1.Mode
+	contractV1Started time.Time
+	lastIntentV1      *contractv1.IntentV1
+	lastRiskV1        *contractv1.RiskDecisionV1
+	lastExecV1        *contractv1.ExecutorResultV1
 }
 
 type SystemStatus struct {
@@ -39,22 +48,23 @@ type SystemStatus struct {
 }
 
 type DecisionStatus struct {
-	Enabled           bool           `json:"enabled"`
-	Blocked           bool           `json:"blocked"`
-	BlockReason       string         `json:"block_reason"`
-	AutoEvalEnabled   bool           `json:"auto_eval_enabled"`
-	LastEvalAt        time.Time      `json:"last_eval_at"`
-	LastEvalAction    string         `json:"last_eval_action"` // noop|mock_rebalance|blocked|...
-	LastEvalReason    string         `json:"last_eval_reason"`
-	LastIntentType    string         `json:"last_intent_type"`
-	LastIntentSummary string         `json:"last_intent_summary"`
-	LastIntentFields  map[string]any `json:"last_intent_fields"`
-	PositionSource    string         `json:"position_source"` // onchain|config_assumed|none
-	PositionLower     int64          `json:"position_lower"`
-	PositionUpper     int64          `json:"position_upper"`
-	PositionTokenID   uint64         `json:"position_token_id"`
-	PositionUpdatedAt time.Time      `json:"position_updated_at"`
-	LastGate          GateStatus     `json:"last_gate"`
+	Enabled           bool                 `json:"enabled"`
+	Blocked           bool                 `json:"blocked"`
+	BlockReason       string               `json:"block_reason"`
+	AutoEvalEnabled   bool                 `json:"auto_eval_enabled"`
+	LastEvalAt        time.Time            `json:"last_eval_at"`
+	LastEvalAction    string               `json:"last_eval_action"` // noop|mock_rebalance|blocked|...
+	LastEvalReason    string               `json:"last_eval_reason"`
+	LastIntentType    string               `json:"last_intent_type"`
+	LastIntentSummary string               `json:"last_intent_summary"`
+	LastIntentFields  map[string]any       `json:"last_intent_fields"`
+	PositionSource    string               `json:"position_source"` // onchain|config_assumed|none
+	PositionLower     int64                `json:"position_lower"`
+	PositionUpper     int64                `json:"position_upper"`
+	PositionTokenID   uint64               `json:"position_token_id"`
+	PositionUpdatedAt time.Time            `json:"position_updated_at"`
+	LastGate          GateStatus           `json:"last_gate"`
+	StatusV1          *contractv1.StatusV1 `json:"status_v1,omitempty"`
 }
 
 type GateStatus struct {
@@ -97,8 +107,10 @@ func NewServerWithConfig(q *strategy.IntentQueue, cfg ServerConfig) *Server {
 			BinanceConnected: cfg.BinanceConnected,
 			PriceSource:      cfg.PriceSource,
 		},
-		decision: DecisionStatus{Enabled: true},
-		mux:      http.NewServeMux(),
+		decision:          DecisionStatus{Enabled: true},
+		mux:               http.NewServeMux(),
+		contractV1Mode:    contractv1.ModeDryRun,
+		contractV1Started: time.Now(),
 	}
 }
 
@@ -123,6 +135,39 @@ func (s *Server) UpdateDecision(decision DecisionStatus) {
 	s.decisionMu.Lock()
 	defer s.decisionMu.Unlock()
 	s.decision = decision
+}
+
+func (s *Server) SetContractV1RunID(runID string) {
+	s.contractV1Mu.Lock()
+	defer s.contractV1Mu.Unlock()
+	s.contractV1RunID = runID
+}
+
+func (s *Server) SetContractV1Mode(mode contractv1.Mode) {
+	s.contractV1Mu.Lock()
+	defer s.contractV1Mu.Unlock()
+	s.contractV1Mode = mode
+}
+
+func (s *Server) UpdateLastIntentV1(v contractv1.IntentV1) {
+	s.contractV1Mu.Lock()
+	defer s.contractV1Mu.Unlock()
+	cp := v
+	s.lastIntentV1 = &cp
+}
+
+func (s *Server) UpdateLastRiskV1(v contractv1.RiskDecisionV1) {
+	s.contractV1Mu.Lock()
+	defer s.contractV1Mu.Unlock()
+	cp := v
+	s.lastRiskV1 = &cp
+}
+
+func (s *Server) UpdateLastExecV1(v contractv1.ExecutorResultV1) {
+	s.contractV1Mu.Lock()
+	defer s.contractV1Mu.Unlock()
+	cp := v
+	s.lastExecV1 = &cp
 }
 
 func (s *Server) UpdatePnL(p PnLSnapshot) {
@@ -222,11 +267,13 @@ func (s *Server) currentDecision() DecisionStatus {
 	if !enabled {
 		out.Blocked = true
 		out.BlockReason = "manual_only"
+		out.StatusV1 = s.buildStatusV1(out)
 		return out
 	}
 	if s.market == nil {
 		out.Blocked = false
 		out.BlockReason = ""
+		out.StatusV1 = s.buildStatusV1(out)
 		return out
 	}
 
@@ -239,11 +286,65 @@ func (s *Server) currentDecision() DecisionStatus {
 	if strings.ToLower(strings.TrimSpace(snap.Risk.Mode)) != "normal" {
 		out.Blocked = true
 		out.BlockReason = snap.Risk.Reason
+		out.StatusV1 = s.buildStatusV1(out)
 		return out
 	}
 
 	out.Blocked = false
 	out.BlockReason = ""
+	out.StatusV1 = s.buildStatusV1(out)
+	return out
+}
+
+func (s *Server) buildStatusV1(decision DecisionStatus) *contractv1.StatusV1 {
+	s.contractV1Mu.RLock()
+	runID := s.contractV1RunID
+	mode := s.contractV1Mode
+	startedAt := s.contractV1Started
+	lastIntent := s.lastIntentV1
+	lastRisk := s.lastRiskV1
+	lastExec := s.lastExecV1
+	s.contractV1Mu.RUnlock()
+
+	state := contractv1.StateRunning
+	if decision.Blocked {
+		if decision.BlockReason == "manual_only" {
+			state = contractv1.StatePaused
+		} else {
+			state = contractv1.StateSafeMode
+		}
+	}
+
+	out := &contractv1.StatusV1{
+		SchemaVersion: contractv1.SchemaVersion,
+		RunID:         runID,
+		Mode:          mode,
+		State:         state,
+		UptimeSec:     int64(time.Since(startedAt).Seconds()),
+	}
+	if lastIntent != nil {
+		out.LastIntent = &contractv1.StatusIntentV1{
+			IntentType: lastIntent.IntentType,
+			IntentID:   lastIntent.IntentID,
+			TsLocalMS:  lastIntent.TsLocalMS,
+			Summary:    lastIntent.Summary,
+			Fields:     lastIntent.Fields,
+		}
+	}
+	if lastRisk != nil {
+		out.LastRisk = &contractv1.StatusRiskV1{
+			Level:        lastRisk.Level,
+			TsLocalMS:    lastRisk.TsLocalMS,
+			ReasonsCount: len(lastRisk.Reasons),
+		}
+	}
+	if lastExec != nil {
+		out.LastExec = &contractv1.StatusExecV1{
+			Status:    lastExec.Status,
+			TsLocalMS: lastExec.TsLocalMS,
+			ErrorKind: lastExec.ErrorKind,
+		}
+	}
 	return out
 }
 
