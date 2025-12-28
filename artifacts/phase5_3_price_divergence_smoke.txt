@@ -1,0 +1,11 @@
+Phase 5.3 Price Divergence Smoke
+ts_utc=2025-12-28T11:25:39Z
+
+=== RUN   TestPhase53PriceDivergenceSmoke
+    phase5_3_price_divergence_smoke_test.go:35: LOW_DEV_APPROVE: ok source_a=onchain source_b=exchange deviation_bps=50 threshold_bps=100
+    phase5_3_price_divergence_smoke_test.go:52: HIGH_DEV_REJECT: price divergence too high source_a=onchain price_a=100.0000000000 ts_a=1700000000000 source_b=exchange price_b=110.0000000000 ts_b=1700000000000 deviation_bps=1000 threshold_bps=100
+    phase5_3_price_divergence_smoke_test.go:65: MISSING_SOURCE_SKIP: skip missing_source=onchain
+    phase5_3_price_divergence_smoke_test.go:80: STALE_SOURCE_SKIP: skip stale_source source_a=onchain age_ms=120000 source_b=exchange age_ms=0 max_staleness_sec=30
+--- PASS: TestPhase53PriceDivergenceSmoke (0.00s)
+PASS
+ok  	phoenix-v3/internal/riskcontrol	0.007s

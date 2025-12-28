@@ -53,6 +53,10 @@ type RiskContext struct {
 	// Market is a snapshot from the in-process PriceAggregator (no new external dependency).
 	Market feed.MarketSnapshot
 
+	// PriceSources holds same-time best-effort prices from multiple sources (no new network requests).
+	// Expected keys in Phase 5.3: "onchain" and "exchange" (or "aggregator").
+	PriceSources map[string]PricePoint
+
 	// LastDecisionAt is the best-effort timestamp of when the candidate intent was produced.
 	LastDecisionAt time.Time
 
@@ -62,6 +66,12 @@ type RiskContext struct {
 	// CandidateIsDryRun indicates whether the executor would broadcast if allowed.
 	// Risk control must reject any live broadcast in this phase.
 	CandidateIsDryRun bool
+}
+
+type PricePoint struct {
+	SourceName string
+	Price      float64
+	TsMS       int64
 }
 
 type SystemHealth struct {

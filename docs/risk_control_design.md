@@ -81,8 +81,17 @@ Phoenix_V3 新决策链顺序（接口与注释层面确定）：
 - 多价格源偏差超过阈值时 `REJECT`
 - 仅使用已有数据（`PriceAggregator` 的 snapshot），不新增外部依赖
 
+### PriceSourceDivergenceRule（Phase 5.3 落地细节）
+- 数据来源（同一时刻的多源快照，规则不发起任何网络请求）：
+  - `exchange`：来自 `PriceAggregator.Snapshot().Aggregate.AggPrice` / `AggUpdatedAt`
+  - `onchain`：来自本进程监听到的池子 tick 推导价格（`tickToDexPrice(...)`）的最近一次值与时间戳
+- 阈值含义：
+  - `max_deviation_bps`（默认 100 bps = 1.00%）：两来源相对偏差超过阈值则拒绝
+  - `max_staleness_sec`（默认 30s）：任一来源快照超过该时间视为 stale
+- stale 策略选择：
+  - 选择 **SKIP（不拒绝）**：stale 更像“不可比较”的状态，短期可能由源重连/短暂抖动导致；同时系统仍受 `HALT/force_dry_run/cooldown` 保护，避免误伤造成长期拒绝。
+
 ## 7）与控制面的关系
 - Risk Control 服从 `control.json.risk_mode`
 - 当 `risk_mode=HALT` 时，风险模块必须无条件 `REJECT`
 - 风险模块只读取 `control.json`，不写入、不修改
-

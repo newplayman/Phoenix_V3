@@ -48,26 +48,27 @@ type SystemStatus struct {
 }
 
 type DecisionStatus struct {
-	Enabled           bool                 `json:"enabled"`
-	Blocked           bool                 `json:"blocked"`
-	BlockReason       string               `json:"block_reason"`
-	AutoEvalEnabled   bool                 `json:"auto_eval_enabled"`
-	LastEvalAt        time.Time            `json:"last_eval_at"`
-	LastEvalAction    string               `json:"last_eval_action"` // noop|mock_rebalance|blocked|...
-	LastEvalReason    string               `json:"last_eval_reason"`
-	LastIntentType    string               `json:"last_intent_type"`
-	LastIntentSummary string               `json:"last_intent_summary"`
-	LastIntentFields  map[string]any       `json:"last_intent_fields"`
-	LastRiskDecision  *RiskDecisionSummary `json:"last_risk_decision,omitempty"`
-	LastRiskCooldown  *RiskCooldownSummary `json:"last_risk_cooldown,omitempty"`
-	TopCooldowns      []CooldownEntry      `json:"top_cooldowns,omitempty"`
-	PositionSource    string               `json:"position_source"` // onchain|config_assumed|none
-	PositionLower     int64                `json:"position_lower"`
-	PositionUpper     int64                `json:"position_upper"`
-	PositionTokenID   uint64               `json:"position_token_id"`
-	PositionUpdatedAt time.Time            `json:"position_updated_at"`
-	LastGate          GateStatus           `json:"last_gate"`
-	StatusV1          *contractv1.StatusV1 `json:"status_v1,omitempty"`
+	Enabled                  bool                         `json:"enabled"`
+	Blocked                  bool                         `json:"blocked"`
+	BlockReason              string                       `json:"block_reason"`
+	AutoEvalEnabled          bool                         `json:"auto_eval_enabled"`
+	LastEvalAt               time.Time                    `json:"last_eval_at"`
+	LastEvalAction           string                       `json:"last_eval_action"` // noop|mock_rebalance|blocked|...
+	LastEvalReason           string                       `json:"last_eval_reason"`
+	LastIntentType           string                       `json:"last_intent_type"`
+	LastIntentSummary        string                       `json:"last_intent_summary"`
+	LastIntentFields         map[string]any               `json:"last_intent_fields"`
+	LastRiskDecision         *RiskDecisionSummary         `json:"last_risk_decision,omitempty"`
+	LastRiskCooldown         *RiskCooldownSummary         `json:"last_risk_cooldown,omitempty"`
+	TopCooldowns             []CooldownEntry              `json:"top_cooldowns,omitempty"`
+	LastPriceDivergenceCheck *PriceDivergenceCheckSummary `json:"last_price_divergence_check,omitempty"`
+	PositionSource           string                       `json:"position_source"` // onchain|config_assumed|none
+	PositionLower            int64                        `json:"position_lower"`
+	PositionUpper            int64                        `json:"position_upper"`
+	PositionTokenID          uint64                       `json:"position_token_id"`
+	PositionUpdatedAt        time.Time                    `json:"position_updated_at"`
+	LastGate                 GateStatus                   `json:"last_gate"`
+	StatusV1                 *contractv1.StatusV1         `json:"status_v1,omitempty"`
 }
 
 type RiskDecisionSummary struct {
@@ -91,6 +92,22 @@ type RiskCooldownSummary struct {
 type CooldownEntry struct {
 	Key               string `json:"key"`
 	CooldownUntilTsMS int64  `json:"cooldown_until_ts_ms"`
+}
+
+type PriceDivergenceCheckSummary struct {
+	At         time.Time `json:"at"`
+	Verdict    string    `json:"verdict"` // APPROVE|REJECT (SKIP is encoded via SkipReason)
+	SkipReason string    `json:"skip_reason,omitempty"`
+
+	SourceA string  `json:"source_a"`
+	PriceA  float64 `json:"price_a"`
+	TsAMS   int64   `json:"ts_a_ms"`
+
+	SourceB string  `json:"source_b"`
+	PriceB  float64 `json:"price_b"`
+	TsBMS   int64   `json:"ts_b_ms"`
+
+	RuleReason string `json:"rule_reason"`
 }
 
 type GateStatus struct {
@@ -169,6 +186,9 @@ func (s *Server) UpdateDecision(decision DecisionStatus) {
 	if len(decision.TopCooldowns) == 0 && len(s.decision.TopCooldowns) > 0 {
 		decision.TopCooldowns = s.decision.TopCooldowns
 	}
+	if decision.LastPriceDivergenceCheck == nil && s.decision.LastPriceDivergenceCheck != nil {
+		decision.LastPriceDivergenceCheck = s.decision.LastPriceDivergenceCheck
+	}
 	s.decision = decision
 }
 
@@ -187,6 +207,13 @@ func (s *Server) UpdateLastRiskCooldown(v RiskCooldownSummary, top []CooldownEnt
 	if top != nil {
 		s.decision.TopCooldowns = top
 	}
+}
+
+func (s *Server) UpdateLastPriceDivergenceCheck(v PriceDivergenceCheckSummary) {
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+	cp := v
+	s.decision.LastPriceDivergenceCheck = &cp
 }
 
 func (s *Server) SetContractV1RunID(runID string) {
