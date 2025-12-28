@@ -1,0 +1,39 @@
+{
+  "missing_skip_count": 1,
+  "price_divergence_stats": {
+    "avg_deviation_bps": 0,
+    "max_deviation_bps": 0,
+    "reject_count": 0,
+    "sample_count": 0
+  },
+  "process_exit_code": 143,
+  "reject_counts_by_rule_id": {
+    "cooldown_frequency": 1
+  },
+  "risk_state_bytes_delta": 565,
+  "risk_state_bytes_end": 565,
+  "risk_state_bytes_start": 0,
+  "rule_counts": {
+    "cooldown_frequency": 2,
+    "force_dry_run": 2,
+    "price_source_divergence": 1,
+    "risk_mode_halt": 2
+  },
+  "run_duration_sec": 130,
+  "sample_count": 12,
+  "skip_counts_by_rule_id": {
+    "price_source_divergence": 1
+  },
+  "stale_skip_count": 0,
+  "top_cooldown_keys": [
+    {
+      "count": 1,
+      "key": "phoenix|mock_rebalance|chain=11155111|pool=tusd-weth-005"
+    }
+  ],
+  "total_evaluations": 2,
+  "verdict_counts": {
+    "REJECT": 1,
+    "SKIP": 1
+  }
+}

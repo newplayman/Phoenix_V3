@@ -266,8 +266,19 @@ func main() {
 
 	// Phase 5.0: Risk Control Module (裁决层) sits between strategy -> executor.
 	// NOTE: This phase is design/interfaces only; it must never enable live trading.
-	rcState := riskcontrol.NewRiskStateStore("var/risk_state.json")
+	riskStatePath := strings.TrimSpace(os.Getenv("RISK_STATE_PATH"))
+	if riskStatePath == "" {
+		riskStatePath = "var/risk_state.json"
+	}
+	riskStatsPath := strings.TrimSpace(os.Getenv("RISK_STATS_PATH"))
+	if riskStatsPath == "" {
+		riskStatsPath = "var/risk_stats.json"
+	}
+
+	rcState := riskcontrol.NewRiskStateStore(riskStatePath)
 	_, _, _ = rcState.LoadIfChanged(time.Now())
+	rcStats := riskcontrol.NewRiskStats(riskStatsPath)
+	_ = rcStats.SaveIfDue(time.Now(), 0)
 	cooldownEnabled := true
 	if v := strings.TrimSpace(os.Getenv("RISK_COOLDOWN_ENABLED")); v != "" {
 		switch strings.ToLower(v) {
@@ -310,7 +321,7 @@ func main() {
 		adapter = univ3.NewAdapter(cfg.Pools[0].PositionManager)
 	}
 
-	go startIntentExecutor(ctx, &cfgValue, intentQueue, rcEval, rcState, cooldownRule, &onchainPriceValue, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer, v1w, &controlStateValue)
+	go startIntentExecutor(ctx, &cfgValue, intentQueue, rcEval, rcState, rcStats, cooldownRule, &onchainPriceValue, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer, v1w, &controlStateValue)
 	if chainGateway != nil {
 		go startReceiptWatcher(ctx, chainGateway.Receipts(), store)
 	}
@@ -1212,7 +1223,7 @@ func startPoolWatcher(ctx context.Context, uniState *dexstate.UniV3State, cfg *c
 	}()
 }
 
-func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, cooldownRule *riskcontrol.CooldownAndFrequencyRule, onchainPriceValue *atomic.Value, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
+func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, rcStats *riskcontrol.RiskStats, cooldownRule *riskcontrol.CooldownAndFrequencyRule, onchainPriceValue *atomic.Value, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
 	go func() {
 		for {
 			intent := queue.Dequeue()
@@ -1229,12 +1240,12 @@ func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *str
 				continue
 			}
 
-			executeIntent(ctx, cfgValue, intent, rcEval, rcState, cooldownRule, onchainPriceValue, riskMgr, guard, gw, store, stream, adapter, market, apiServer, v1w, controlValue)
+			executeIntent(ctx, cfgValue, intent, rcEval, rcState, rcStats, cooldownRule, onchainPriceValue, riskMgr, guard, gw, store, stream, adapter, market, apiServer, v1w, controlValue)
 		}
 	}()
 }
 
-func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, cooldownRule *riskcontrol.CooldownAndFrequencyRule, onchainPriceValue *atomic.Value, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
+func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, rcStats *riskcontrol.RiskStats, cooldownRule *riskcontrol.CooldownAndFrequencyRule, onchainPriceValue *atomic.Value, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
 	if intent.Metadata == nil {
 		intent.Metadata = make(map[string]string)
 	}
@@ -1317,6 +1328,10 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 			System:            riskcontrol.SystemHealth{BacklogLen: -1, HealthzOK: true, RPCOK: true},
 		}
 		ev := rcEval.Evaluate(intent, rcCtx)
+		if rcStats != nil {
+			rcStats.ObserveEvaluation(intent, rcCtx, ev)
+			_ = rcStats.Save(time.Now())
+		}
 
 		// Phase 5.3: expose and log price divergence checks (including SKIP reasons).
 		for _, d := range ev.Decisions {
