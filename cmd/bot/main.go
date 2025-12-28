@@ -35,6 +35,7 @@ import (
 	"phoenix-v3/internal/obs/v1jsonl"
 	"phoenix-v3/internal/poolguard"
 	"phoenix-v3/internal/risk"
+	"phoenix-v3/internal/riskcontrol"
 	"phoenix-v3/internal/storage"
 	"phoenix-v3/internal/strategy"
 	contractv1 "shared/contracts/contract/v1"
@@ -47,12 +48,31 @@ const (
 	contractV1MetaTTLMS     = "contract_v1_ttl_ms"
 )
 
+// Global contract-v1 JSONL writer used by helpers outside main().
+// main() is still free to shadow writeV1 with a local closure.
+var globalV1Writer atomic.Value // stores *v1jsonl.Writer
+
+func writeV1(typ string, data any) {
+	v := globalV1Writer.Load()
+	if v == nil {
+		return
+	}
+	w, ok := v.(*v1jsonl.Writer)
+	if !ok || w == nil {
+		return
+	}
+	if err := w.WriteEvent(typ, data); err != nil {
+		log.Printf("[v1jsonl] write failed: %v", err)
+	}
+}
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	runID := fmt.Sprintf("phoenix-%d", time.Now().UnixNano())
 	v1w := v1jsonl.NewWriter("var/contract_v1.jsonl")
+	globalV1Writer.Store(v1w)
 	writeV1 := func(typ string, data any) {
 		if err := v1w.WriteEvent(typ, data); err != nil {
 			log.Printf("[v1jsonl] write failed: %v", err)
@@ -243,6 +263,14 @@ func main() {
 	// Add a dummy blacklist for testing
 	guard.AddBlacklistToken("0x000000000000000000000000000000000000dead")
 
+	// Phase 5.0: Risk Control Module (裁决层) sits between strategy -> executor.
+	// NOTE: This phase is design/interfaces only; it must never enable live trading.
+	rcEval := riskcontrol.NewEvaluator(
+		riskcontrol.NewForceDryRunRule(),
+		riskcontrol.NewCooldownAndFrequencyRule(2*time.Second, 30*time.Second),
+		riskcontrol.NewPriceSourceDivergenceRule(0.01),
+	)
+
 	log.Println("Phoenix V3 Bot Started (Phase 6: Secured).")
 
 	var adapter *univ3.Adapter
@@ -250,7 +278,7 @@ func main() {
 		adapter = univ3.NewAdapter(cfg.Pools[0].PositionManager)
 	}
 
-	go startIntentExecutor(ctx, &cfgValue, intentQueue, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer, v1w, &controlStateValue)
+	go startIntentExecutor(ctx, &cfgValue, intentQueue, rcEval, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer, v1w, &controlStateValue)
 	if chainGateway != nil {
 		go startReceiptWatcher(ctx, chainGateway.Receipts(), store)
 	}
@@ -1145,7 +1173,7 @@ func startPoolWatcher(ctx context.Context, uniState *dexstate.UniV3State, cfg *c
 	}()
 }
 
-func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
+func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, rcEval *riskcontrol.Evaluator, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
 	go func() {
 		for {
 			intent := queue.Dequeue()
@@ -1162,12 +1190,12 @@ func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *str
 				continue
 			}
 
-			executeIntent(ctx, cfgValue, intent, riskMgr, guard, gw, store, stream, adapter, market, apiServer, v1w, controlValue)
+			executeIntent(ctx, cfgValue, intent, rcEval, riskMgr, guard, gw, store, stream, adapter, market, apiServer, v1w, controlValue)
 		}
 	}()
 }
 
-func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
+func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, rcEval *riskcontrol.Evaluator, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
 	if intent.Metadata == nil {
 		intent.Metadata = make(map[string]string)
 	}
@@ -1454,6 +1482,47 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	if intent.Type == contracts.IntentMockRebalance || intent.Type == contracts.IntentRebalanceV3 {
 		// This intent is intentionally non-broadcasting.
 		isDryRun = true
+	}
+
+	// Phase 5.0 insertion point:
+	// market data -> strategy -> candidate_intent -> risk_control.evaluate() -> final_intent -> executor
+	//
+	// This phase must keep dry-run enforced. The evaluator is allowed to REJECT/MODIFY,
+	// but it must never expand risk nor bypass control.json guardrails.
+	if rcEval != nil {
+		mSnap := feed.MarketSnapshot{}
+		if market != nil {
+			mSnap = market.Snapshot()
+		}
+		rcCtx := riskcontrol.RiskContext{
+			Now:               time.Now(),
+			Control:           ctrl,
+			Market:            mSnap,
+			CandidateIsDryRun: isDryRun,
+		}
+		ev := rcEval.Evaluate(intent, rcCtx)
+		if ev.FinalVerdict == riskcontrol.VerdictReject {
+			log.Printf("[RiskControl] reject intent %s rule_id=%s reason=%s", intent.ID, ev.FinalRuleID, ev.FinalReason)
+			execV1 := contractv1.ExecutorResultV1{
+				SchemaVersion: contractv1.SchemaVersion,
+				IntentID:      v1IntentID,
+				TsLocalMS:     nowMS,
+				Status:        contractv1.ExecutionStatusSkipped,
+				ErrorKind:     contractv1.ErrorKindNone,
+				Receipt: map[string]any{
+					"skipped_reason":  "risk_control_reject",
+					"rule_id":         ev.FinalRuleID,
+					"reason":          ev.FinalReason,
+					"would_broadcast": false,
+				},
+			}
+			if apiServer != nil {
+				apiServer.UpdateLastExecV1(execV1)
+			}
+			writeV1("ExecutorResultV1", execV1)
+			return
+		}
+		intent = ev.FinalIntent
 	}
 	log.Printf("[IntentExecutor] executing %s dry_run=%v", intent.ID, isDryRun)
 
