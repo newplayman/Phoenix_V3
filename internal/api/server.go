@@ -59,6 +59,8 @@ type DecisionStatus struct {
 	LastIntentSummary string               `json:"last_intent_summary"`
 	LastIntentFields  map[string]any       `json:"last_intent_fields"`
 	LastRiskDecision  *RiskDecisionSummary `json:"last_risk_decision,omitempty"`
+	LastRiskCooldown  *RiskCooldownSummary `json:"last_risk_cooldown,omitempty"`
+	TopCooldowns      []CooldownEntry      `json:"top_cooldowns,omitempty"`
 	PositionSource    string               `json:"position_source"` // onchain|config_assumed|none
 	PositionLower     int64                `json:"position_lower"`
 	PositionUpper     int64                `json:"position_upper"`
@@ -77,6 +79,18 @@ type RiskDecisionSummary struct {
 	IntentType string    `json:"intent_type"`
 	ChainID    int64     `json:"chain_id"`
 	PoolID     string    `json:"pool_id"`
+}
+
+type RiskCooldownSummary struct {
+	At                time.Time `json:"at"`
+	Key               string    `json:"key"`
+	CooldownUntilTsMS int64     `json:"cooldown_until_ts_ms"`
+	Reason            string    `json:"reason"`
+}
+
+type CooldownEntry struct {
+	Key               string `json:"key"`
+	CooldownUntilTsMS int64  `json:"cooldown_until_ts_ms"`
 }
 
 type GateStatus struct {
@@ -149,6 +163,12 @@ func (s *Server) UpdateDecision(decision DecisionStatus) {
 	if decision.LastRiskDecision == nil && s.decision.LastRiskDecision != nil {
 		decision.LastRiskDecision = s.decision.LastRiskDecision
 	}
+	if decision.LastRiskCooldown == nil && s.decision.LastRiskCooldown != nil {
+		decision.LastRiskCooldown = s.decision.LastRiskCooldown
+	}
+	if len(decision.TopCooldowns) == 0 && len(s.decision.TopCooldowns) > 0 {
+		decision.TopCooldowns = s.decision.TopCooldowns
+	}
 	s.decision = decision
 }
 
@@ -157,6 +177,16 @@ func (s *Server) UpdateLastRiskDecision(v RiskDecisionSummary) {
 	defer s.decisionMu.Unlock()
 	cp := v
 	s.decision.LastRiskDecision = &cp
+}
+
+func (s *Server) UpdateLastRiskCooldown(v RiskCooldownSummary, top []CooldownEntry) {
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+	cp := v
+	s.decision.LastRiskCooldown = &cp
+	if top != nil {
+		s.decision.TopCooldowns = top
+	}
 }
 
 func (s *Server) SetContractV1RunID(runID string) {

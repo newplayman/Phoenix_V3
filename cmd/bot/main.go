@@ -265,9 +265,26 @@ func main() {
 
 	// Phase 5.0: Risk Control Module (裁决层) sits between strategy -> executor.
 	// NOTE: This phase is design/interfaces only; it must never enable live trading.
+	rcState := riskcontrol.NewRiskStateStore("var/risk_state.json")
+	_, _, _ = rcState.LoadIfChanged(time.Now())
+	cooldownEnabled := true
+	if v := strings.TrimSpace(os.Getenv("RISK_COOLDOWN_ENABLED")); v != "" {
+		switch strings.ToLower(v) {
+		case "0", "false", "no", "off":
+			cooldownEnabled = false
+		}
+	}
+	cooldownRule := riskcontrol.NewCooldownAndFrequencyRule(rcState, riskcontrol.CooldownConfig{
+		Enabled:          cooldownEnabled,
+		Target:           "phoenix",
+		MinInterval:      60 * time.Second,
+		FailureThreshold: 3,
+		CooldownFor:      300 * time.Second,
+	})
 	rcEval := riskcontrol.NewEvaluator(
 		riskcontrol.NewRiskModeHALTRule(),
 		riskcontrol.NewForceDryRunRule(),
+		cooldownRule,
 	)
 
 	log.Println("Phoenix V3 Bot Started (Phase 6: Secured).")
@@ -277,7 +294,7 @@ func main() {
 		adapter = univ3.NewAdapter(cfg.Pools[0].PositionManager)
 	}
 
-	go startIntentExecutor(ctx, &cfgValue, intentQueue, rcEval, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer, v1w, &controlStateValue)
+	go startIntentExecutor(ctx, &cfgValue, intentQueue, rcEval, rcState, cooldownRule, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer, v1w, &controlStateValue)
 	if chainGateway != nil {
 		go startReceiptWatcher(ctx, chainGateway.Receipts(), store)
 	}
@@ -1172,7 +1189,7 @@ func startPoolWatcher(ctx context.Context, uniState *dexstate.UniV3State, cfg *c
 	}()
 }
 
-func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, rcEval *riskcontrol.Evaluator, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
+func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, cooldownRule *riskcontrol.CooldownAndFrequencyRule, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
 	go func() {
 		for {
 			intent := queue.Dequeue()
@@ -1189,12 +1206,12 @@ func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *str
 				continue
 			}
 
-			executeIntent(ctx, cfgValue, intent, rcEval, riskMgr, guard, gw, store, stream, adapter, market, apiServer, v1w, controlValue)
+			executeIntent(ctx, cfgValue, intent, rcEval, rcState, cooldownRule, riskMgr, guard, gw, store, stream, adapter, market, apiServer, v1w, controlValue)
 		}
 	}()
 }
 
-func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, rcEval *riskcontrol.Evaluator, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
+func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, cooldownRule *riskcontrol.CooldownAndFrequencyRule, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
 	if intent.Metadata == nil {
 		intent.Metadata = make(map[string]string)
 	}
@@ -1295,6 +1312,27 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 			})
 		}
 
+		if cooldownRule != nil && ev.FinalRuleID == cooldownRule.RuleID() {
+			key, untilMS := cooldownRule.LastMatch()
+			if key == "" {
+				key = riskcontrol.CooldownKey("phoenix", intent)
+			}
+			top := []api.CooldownEntry(nil)
+			if rcState != nil {
+				for _, e := range rcState.SnapshotTopCooldowns(time.Now(), 10) {
+					top = append(top, api.CooldownEntry{Key: e.Key, CooldownUntilTsMS: e.CooldownUntilMS})
+				}
+			}
+			if apiServer != nil {
+				apiServer.UpdateLastRiskCooldown(api.RiskCooldownSummary{
+					At:                time.Now(),
+					Key:               key,
+					CooldownUntilTsMS: untilMS,
+					Reason:            ev.FinalReason,
+				}, top)
+			}
+		}
+
 		if ev.FinalVerdict == riskcontrol.VerdictReject {
 			execV1 := contractv1.ExecutorResultV1{
 				SchemaVersion: contractv1.SchemaVersion,
@@ -1306,6 +1344,7 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 					"skipped_reason":  "risk_control_reject",
 					"rule_id":         ev.FinalRuleID,
 					"reason":          ev.FinalReason,
+					"cooldown_key":    riskcontrol.CooldownKey("phoenix", intent),
 					"would_broadcast": false,
 				},
 			}
@@ -1577,6 +1616,19 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	var txHash string
 	var status string
 
+	cooldownKey := ""
+	if rcState != nil {
+		cooldownKey = riskcontrol.CooldownKey("phoenix", intent)
+	}
+	failureThreshold := 3
+	cooldownFor := 300 * time.Second
+	if cooldownRule != nil {
+		if th, cd := cooldownRule.FailurePolicy(); th > 0 && cd > 0 {
+			failureThreshold = th
+			cooldownFor = cd
+		}
+	}
+
 	if !isDryRun && intent.Type != contracts.IntentSwap && adapter == nil {
 		log.Printf("[IntentExecutor] skip intent %s (non-swap broadcast disabled without adapter)", intent.ID)
 		riskMgr.RecordFailure()
@@ -1610,6 +1662,21 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	if err := maybePrepareSwapHelperCall(ctx, currentCfg, &intent); err != nil {
 		log.Printf("[Swap] skip intent %s: %v", intent.ID, err)
 		riskMgr.RecordFailure()
+		if rcState != nil && cooldownKey != "" {
+			untilMS, failCount, _ := rcState.RecordFailure(time.Now(), cooldownKey, failureThreshold, cooldownFor)
+			if untilMS > 0 && apiServer != nil {
+				top := []api.CooldownEntry(nil)
+				for _, e := range rcState.SnapshotTopCooldowns(time.Now(), 10) {
+					top = append(top, api.CooldownEntry{Key: e.Key, CooldownUntilTsMS: e.CooldownUntilMS})
+				}
+				apiServer.UpdateLastRiskCooldown(api.RiskCooldownSummary{
+					At:                time.Now(),
+					Key:               cooldownKey,
+					CooldownUntilTsMS: untilMS,
+					Reason:            fmt.Sprintf("failure_threshold_reached failure_count=%d threshold=%d", failCount, failureThreshold),
+				}, top)
+			}
+		}
 		return
 	}
 
@@ -1645,16 +1712,37 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 		status = "simulated"
 		log.Println(">>> Dry Run: Simulated Tx Execution")
 		riskMgr.RecordSuccess()
+		if rcState != nil && cooldownKey != "" {
+			_ = rcState.RecordSuccess(time.Now(), cooldownKey)
+		}
 	} else {
 		result, err := gw.Send(ctx, intent)
 		if err != nil {
 			log.Printf("[Gateway] send intent %s failed: %v", intent.ID, err)
 			status = "failed"
 			riskMgr.RecordFailure()
+			if rcState != nil && cooldownKey != "" {
+				untilMS, failCount, _ := rcState.RecordFailure(time.Now(), cooldownKey, failureThreshold, cooldownFor)
+				if untilMS > 0 && apiServer != nil {
+					top := []api.CooldownEntry(nil)
+					for _, e := range rcState.SnapshotTopCooldowns(time.Now(), 10) {
+						top = append(top, api.CooldownEntry{Key: e.Key, CooldownUntilTsMS: e.CooldownUntilMS})
+					}
+					apiServer.UpdateLastRiskCooldown(api.RiskCooldownSummary{
+						At:                time.Now(),
+						Key:               cooldownKey,
+						CooldownUntilTsMS: untilMS,
+						Reason:            fmt.Sprintf("failure_threshold_reached failure_count=%d threshold=%d", failCount, failureThreshold),
+					}, top)
+				}
+			}
 		} else {
 			txHash = result.Hash.Hex()
 			status = string(result.Status)
 			riskMgr.RecordSuccess()
+			if rcState != nil && cooldownKey != "" {
+				_ = rcState.RecordSuccess(time.Now(), cooldownKey)
+			}
 		}
 	}
 

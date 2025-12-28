@@ -1,0 +1,11 @@
+Phase 5.2 Risk Cooldown Smoke
+ts_utc=2025-12-28T11:05:02Z
+
+=== RUN   TestPhase52CooldownSmoke
+    phase5_2_cooldown_smoke_test.go:40: APPROVE: verdict=APPROVE reason=ok cooldown_key=phoenix|swap|chain=1|pool=pool_1
+    phase5_2_cooldown_smoke_test.go:53: MIN_INTERVAL_REJECT: min interval violation cooldown_key=phoenix|swap|chain=1|pool=pool_1 remaining_ms=50000 min_interval_sec=60 next_allowed_ts_ms=1700000060000
+    phase5_2_cooldown_smoke_test.go:82: FAILURE_COOLDOWN_REJECT: cooldown active cooldown_key=phoenix|swap|chain=1|pool=pool_1 remaining_ms=299000 cooldown_until_ts_ms=1700000370000 failure_count=3 threshold=3
+    phase5_2_cooldown_smoke_test.go:97: PERSIST_RELOAD_REJECT: cooldown active cooldown_key=phoenix|swap|chain=1|pool=pool_1 remaining_ms=298000 cooldown_until_ts_ms=1700000370000 failure_count=3 threshold=3
+--- PASS: TestPhase52CooldownSmoke (0.00s)
+PASS
+ok  	phoenix-v3/internal/riskcontrol	0.008s
