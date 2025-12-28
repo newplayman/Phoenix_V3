@@ -266,9 +266,8 @@ func main() {
 	// Phase 5.0: Risk Control Module (裁决层) sits between strategy -> executor.
 	// NOTE: This phase is design/interfaces only; it must never enable live trading.
 	rcEval := riskcontrol.NewEvaluator(
+		riskcontrol.NewRiskModeHALTRule(),
 		riskcontrol.NewForceDryRunRule(),
-		riskcontrol.NewCooldownAndFrequencyRule(2*time.Second, 30*time.Second),
-		riskcontrol.NewPriceSourceDivergenceRule(0.01),
 	)
 
 	log.Println("Phoenix V3 Bot Started (Phase 6: Secured).")
@@ -1221,6 +1220,103 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 	ctrlRiskMode := strings.TrimSpace(ctrl.RiskMode)
 	ctrlForceDry := ctrl.ForceDryRun
 
+	// Build a "would-broadcast" view for risk control checks (pre-enforcement).
+	currentCfg := cfgValue.Load().(*config.AppConfig)
+	candidateIsDryRun := currentCfg.Strategy.DryRun
+	if ctrlForceDry {
+		candidateIsDryRun = true
+	}
+	if intent.Type == contracts.IntentMockRebalance || intent.Type == contracts.IntentRebalanceV3 {
+		// This intent is intentionally non-broadcasting.
+		candidateIsDryRun = true
+	}
+
+	// Phase 5.1 insertion point (authoritative):
+	// market data -> strategy -> candidate_intent -> risk_control.evaluate() -> final_intent/拒绝 -> executor(dry-run)
+	//
+	// Requirements:
+	// - Must evaluate every candidate intent.
+	// - REJECT: do not enter executor.
+	// - APPROVE: proceed with original intent.
+	// - MODIFY: keep structure but do not apply modifications in Phase 5.1.
+	if rcEval != nil {
+		mSnap := feed.MarketSnapshot{}
+		if market != nil {
+			mSnap = market.Snapshot()
+		}
+		lastDecisionAt := time.Time{}
+		if v1TsMS > 0 {
+			lastDecisionAt = time.UnixMilli(v1TsMS)
+		}
+		rcCtx := riskcontrol.RiskContext{
+			Now:               time.Now(),
+			Control:           ctrl,
+			Market:            mSnap,
+			LastDecisionAt:    lastDecisionAt,
+			CandidateIsDryRun: candidateIsDryRun,
+			System:            riskcontrol.SystemHealth{BacklogLen: -1, HealthzOK: true, RPCOK: true},
+		}
+		ev := rcEval.Evaluate(intent, rcCtx)
+
+		// Structured log (audit-friendly, no raw metadata).
+		rcLog := map[string]any{
+			"component": "risk_control",
+			"rule_id":   ev.FinalRuleID,
+			"verdict":   ev.FinalVerdict,
+			"reason":    ev.FinalReason,
+			"intent": map[string]any{
+				"id":               intent.ID,
+				"type":             string(intent.Type),
+				"chain_id":         intent.ChainID,
+				"pool_id":          intent.PoolID,
+				"urgency":          intent.Urgency,
+				"strategy_version": intent.StrategyVersion,
+				"risk_mode":        intent.RiskMode,
+			},
+		}
+		if b, err := json.Marshal(rcLog); err == nil {
+			if ev.FinalVerdict == riskcontrol.VerdictReject {
+				log.Printf("[WARN] %s", string(b))
+			} else {
+				log.Printf("[INFO] %s", string(b))
+			}
+		}
+
+		if apiServer != nil {
+			apiServer.UpdateLastRiskDecision(api.RiskDecisionSummary{
+				At:         time.Now(),
+				Verdict:    string(ev.FinalVerdict),
+				RuleID:     ev.FinalRuleID,
+				Reason:     ev.FinalReason,
+				IntentID:   intent.ID,
+				IntentType: string(intent.Type),
+				ChainID:    intent.ChainID,
+				PoolID:     intent.PoolID,
+			})
+		}
+
+		if ev.FinalVerdict == riskcontrol.VerdictReject {
+			execV1 := contractv1.ExecutorResultV1{
+				SchemaVersion: contractv1.SchemaVersion,
+				IntentID:      v1IntentID,
+				TsLocalMS:     nowMS,
+				Status:        contractv1.ExecutionStatusSkipped,
+				ErrorKind:     contractv1.ErrorKindNone,
+				Receipt: map[string]any{
+					"skipped_reason":  "risk_control_reject",
+					"rule_id":         ev.FinalRuleID,
+					"reason":          ev.FinalReason,
+					"would_broadcast": false,
+				},
+			}
+			if apiServer != nil {
+				apiServer.UpdateLastExecV1(execV1)
+			}
+			writeV1("ExecutorResultV1", execV1)
+			return
+		}
+	}
+
 	if ctrlRiskMode != "" && ctrlRiskMode != "SAFE" {
 		level := contractv1.RiskLevelDeny
 		switch ctrlRiskMode {
@@ -1474,56 +1570,8 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 		return
 	}
 
-	currentCfg := cfgValue.Load().(*config.AppConfig)
-	isDryRun := currentCfg.Strategy.DryRun
-	if ctrlForceDry {
-		isDryRun = true
-	}
-	if intent.Type == contracts.IntentMockRebalance || intent.Type == contracts.IntentRebalanceV3 {
-		// This intent is intentionally non-broadcasting.
-		isDryRun = true
-	}
-
-	// Phase 5.0 insertion point:
-	// market data -> strategy -> candidate_intent -> risk_control.evaluate() -> final_intent -> executor
-	//
-	// This phase must keep dry-run enforced. The evaluator is allowed to REJECT/MODIFY,
-	// but it must never expand risk nor bypass control.json guardrails.
-	if rcEval != nil {
-		mSnap := feed.MarketSnapshot{}
-		if market != nil {
-			mSnap = market.Snapshot()
-		}
-		rcCtx := riskcontrol.RiskContext{
-			Now:               time.Now(),
-			Control:           ctrl,
-			Market:            mSnap,
-			CandidateIsDryRun: isDryRun,
-		}
-		ev := rcEval.Evaluate(intent, rcCtx)
-		if ev.FinalVerdict == riskcontrol.VerdictReject {
-			log.Printf("[RiskControl] reject intent %s rule_id=%s reason=%s", intent.ID, ev.FinalRuleID, ev.FinalReason)
-			execV1 := contractv1.ExecutorResultV1{
-				SchemaVersion: contractv1.SchemaVersion,
-				IntentID:      v1IntentID,
-				TsLocalMS:     nowMS,
-				Status:        contractv1.ExecutionStatusSkipped,
-				ErrorKind:     contractv1.ErrorKindNone,
-				Receipt: map[string]any{
-					"skipped_reason":  "risk_control_reject",
-					"rule_id":         ev.FinalRuleID,
-					"reason":          ev.FinalReason,
-					"would_broadcast": false,
-				},
-			}
-			if apiServer != nil {
-				apiServer.UpdateLastExecV1(execV1)
-			}
-			writeV1("ExecutorResultV1", execV1)
-			return
-		}
-		intent = ev.FinalIntent
-	}
+	// Phase 5.1 behavior guarantee: never allow live trading from this binary.
+	isDryRun := true
 	log.Printf("[IntentExecutor] executing %s dry_run=%v", intent.ID, isDryRun)
 
 	var txHash string

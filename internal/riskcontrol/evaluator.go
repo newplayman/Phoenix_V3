@@ -38,19 +38,6 @@ func (e *Evaluator) Evaluate(intent contracts.Intent, ctx RiskContext) Evaluatio
 		FinalIntent:  intent,
 	}
 
-	// Control plane is the highest priority safety rail.
-	if strings.TrimSpace(ctx.Control.RiskMode) == "HALT" {
-		out.FinalVerdict = VerdictReject
-		out.FinalRuleID = "control_risk_mode_halt"
-		out.FinalReason = "control.json risk_mode=HALT"
-		out.Decisions = append(out.Decisions, RiskDecision{
-			Verdict: VerdictReject,
-			RuleID:  out.FinalRuleID,
-			Reason:  out.FinalReason,
-		})
-		return out
-	}
-
 	var bestModify *RiskDecision
 	for _, rule := range e.Rules {
 		d := rule.Evaluate(intent, ctx)
@@ -92,9 +79,6 @@ func (e *Evaluator) Evaluate(intent contracts.Intent, ctx RiskContext) Evaluatio
 		out.FinalVerdict = VerdictModify
 		out.FinalRuleID = bestModify.RuleID
 		out.FinalReason = bestModify.Reason
-		if bestModify.Degrade != nil {
-			out.FinalIntent = ApplyDegradation(intent, *bestModify.Degrade)
-		}
 		return out
 	}
 

@@ -53,6 +53,9 @@ type RiskContext struct {
 	// Market is a snapshot from the in-process PriceAggregator (no new external dependency).
 	Market feed.MarketSnapshot
 
+	// LastDecisionAt is the best-effort timestamp of when the candidate intent was produced.
+	LastDecisionAt time.Time
+
 	// System is an optional, best-effort summary of system health metrics.
 	System SystemHealth
 

@@ -58,6 +58,7 @@ type DecisionStatus struct {
 	LastIntentType    string               `json:"last_intent_type"`
 	LastIntentSummary string               `json:"last_intent_summary"`
 	LastIntentFields  map[string]any       `json:"last_intent_fields"`
+	LastRiskDecision  *RiskDecisionSummary `json:"last_risk_decision,omitempty"`
 	PositionSource    string               `json:"position_source"` // onchain|config_assumed|none
 	PositionLower     int64                `json:"position_lower"`
 	PositionUpper     int64                `json:"position_upper"`
@@ -65,6 +66,17 @@ type DecisionStatus struct {
 	PositionUpdatedAt time.Time            `json:"position_updated_at"`
 	LastGate          GateStatus           `json:"last_gate"`
 	StatusV1          *contractv1.StatusV1 `json:"status_v1,omitempty"`
+}
+
+type RiskDecisionSummary struct {
+	At         time.Time `json:"at"`
+	Verdict    string    `json:"verdict"` // APPROVE|MODIFY|REJECT
+	RuleID     string    `json:"rule_id"`
+	Reason     string    `json:"reason"`
+	IntentID   string    `json:"intent_id"`
+	IntentType string    `json:"intent_type"`
+	ChainID    int64     `json:"chain_id"`
+	PoolID     string    `json:"pool_id"`
 }
 
 type GateStatus struct {
@@ -134,7 +146,17 @@ func (s *Server) SetMarketAggregator(market *feed.PriceAggregator) {
 func (s *Server) UpdateDecision(decision DecisionStatus) {
 	s.decisionMu.Lock()
 	defer s.decisionMu.Unlock()
+	if decision.LastRiskDecision == nil && s.decision.LastRiskDecision != nil {
+		decision.LastRiskDecision = s.decision.LastRiskDecision
+	}
 	s.decision = decision
+}
+
+func (s *Server) UpdateLastRiskDecision(v RiskDecisionSummary) {
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+	cp := v
+	s.decision.LastRiskDecision = &cp
 }
 
 func (s *Server) SetContractV1RunID(runID string) {
