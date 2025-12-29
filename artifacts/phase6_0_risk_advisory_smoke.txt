@@ -1,0 +1,56 @@
+=== Phase 6.0 Risk Advisory Smoke Test ===
+ts_utc=2025-12-29T17:20:00Z
+
+[smoke] Verifying advisory code does NOT reference control.json...
+✓ No code references to control.json in advisory (comments OK)
+
+=== Scenario 1: HALT (high divergence reject rate) ===
+✓ HALT advisory generated: var/test_advisory_halt.json
+  suggestion=HALT, confidence=0.7
+  reason: divergence_reject_rate=0.8000 >= threshold 0.8000, max_deviation_bps=850 >= threshold 500
+
+=== Scenario 2: SAFE (high time_mismatch skip rate) ===
+✓ SAFE advisory generated: var/test_advisory_safe.json
+  suggestion=SAFE, confidence=0.6
+  reason: time_mismatch_skip_rate=0.7000 >= threshold 0.7000, total_evaluations=40 >= threshold 20
+
+=== Scenario 3: NO_CHANGE (normal operation) ===
+✓ NO_CHANGE advisory generated: var/test_advisory_nochange.json
+  suggestion=NO_CHANGE, confidence=0.5
+  reason: no risk conditions triggered, system operating normally
+
+=== Verification ===
+✓ HALT scenario: suggestion=HALT
+✓ SAFE scenario: suggestion=SAFE
+✓ NO_CHANGE scenario: suggestion=NO_CHANGE
+
+wrote artifacts/phase6_0_risk_advisory_smoke_summary.json
+
+✓ ALL SMOKE TESTS PASSED
+  - HALT scenario: ✓
+  - SAFE scenario: ✓
+  - NO_CHANGE scenario: ✓
+  - No control.json writes: ✓
+
+=== Sample Advisory (HALT) ===
+{
+  "ts_ms": 1767028800947,
+  "window_sec": 3600,
+  "suggested_risk_mode": "HALT",
+  "confidence": 0.7,
+  "reasons": [
+    "divergence_reject_rate=0.8000 >= threshold 0.8000, max_deviation_bps=850 >= threshold 500"
+  ],
+  "evidence": {
+    "total_evaluations": 50,
+    "reject_rate": 0.84,
+    "skip_rate": 0.06,
+    "time_mismatch_skip_rate": 0.04,
+    "divergence_reject_rate": 0.8,
+    "cooldown_reject_rate": 0.04,
+    "max_deviation_bps": 850,
+    "p95_deviation_bps": 720
+  }
+}
+wrote artifacts/phase6_0_risk_advisory_smoke.txt
+wrote artifacts/phase6_0_risk_advisory_smoke_summary.json

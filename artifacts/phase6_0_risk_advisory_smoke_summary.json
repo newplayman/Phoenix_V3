@@ -1,0 +1,17 @@
+{
+  "test_timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "scenarios": {
+    "halt": true,
+    "safe": true,
+    "no_change": true
+  },
+  "all_scenarios_passed": true,
+  "advisory_output_location": "var/risk_advisory.json",
+  "audit_trail_location": "var/risk_advisory_audit.jsonl",
+  "control_json_write_check": "passed (no references found)",
+  "sample_advisories": {
+    "halt": "var/test_advisory_halt.json",
+    "safe": "var/test_advisory_safe.json",
+    "no_change": "var/test_advisory_nochange.json"
+  }
+}
