@@ -16,6 +16,8 @@ tmp/
 .tmp_*.log
 artifacts/phase5_4_risk_soak_retest_2h*
 artifacts/phase5_6_divergence_reject_samples.*
+artifacts/phase5_6_divergence_samples_smoke.*
+artifacts/phase5_7_*
 
 # build outputs
 bin/

@@ -10,9 +10,10 @@ OUT="artifacts/phase5_4_risk_soak_retest_2h.txt"
 SUMMARY="artifacts/phase5_4_risk_soak_retest_2h_summary.json"
 BOT_LOG="var/phase5_4_risk_soak_retest_2h_bot.log"
 
-# Fixed duration: 2 hours.
-DURATION_SEC="7200"
+# Default duration: 2 hours. Phase 5.7 may override for shorter retests.
+DURATION_SEC="${DURATION_SEC_OVERRIDE:-7200}"
 SAMPLE_SEC="${SAMPLE_SEC:-60}"
+ENQUEUE_EVERY_SEC="${ENQUEUE_EVERY_SEC:-60}"
 API_PORT="${API_PORT:-}"
 ADMIN_TOKEN="${ADMIN_TOKEN:-phase5_4}"
 CHAIN_ID="${CHAIN_ID:-11155111}"
@@ -136,6 +137,7 @@ else
 fi
 
 SAMPLES=0
+LAST_ENQUEUE_TS=0
 while true; do
   NOW_TS="$(date +%s)"
   ELAPSED=$(( NOW_TS - START_TS ))
@@ -176,6 +178,18 @@ print(f"[sample] ts_utc={ts} total_evaluations={total} reject={reject} skip={ski
 PY
 
   SAMPLES=$((SAMPLES + 1))
+
+  # Ensure we generate comparable risk evaluations during the retest window.
+  # Cooldown min interval is 60s, so default cadence is 60s.
+  if [ "${ENQUEUE_EVERY_SEC}" -gt 0 ] && [ $(( NOW_TS - LAST_ENQUEUE_TS )) -ge "${ENQUEUE_EVERY_SEC}" ]; then
+    if enqueue_intent "${POOL_ID}" "mock_rebalance"; then
+      echo "[retest] periodic enqueue ok ts_utc=$(ts_utc)" >>"$OUT"
+    else
+      echo "[retest] periodic enqueue failed ts_utc=$(ts_utc)" >>"$OUT"
+    fi
+    LAST_ENQUEUE_TS="$NOW_TS"
+  fi
+
   sleep "$SAMPLE_SEC"
 done
 

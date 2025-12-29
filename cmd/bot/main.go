@@ -300,10 +300,17 @@ func main() {
 			priceDivEnabled = false
 		}
 	}
+	alignGapMS := int64(5000)
+	if v := strings.TrimSpace(os.Getenv("RISK_PRICE_DIVERGENCE_ALIGN_MAX_GAP_MS")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			alignGapMS = n
+		}
+	}
 	priceDivRule := riskcontrol.NewPriceSourceDivergenceRule(riskcontrol.PriceSourceDivergenceConfig{
 		Enabled:         priceDivEnabled,
 		MaxDeviationBps: 100,
 		MaxStaleness:    30 * time.Second,
+		AlignMaxGap:     time.Duration(alignGapMS) * time.Millisecond,
 		SourceA:         "onchain",
 		SourceB:         "exchange",
 	})

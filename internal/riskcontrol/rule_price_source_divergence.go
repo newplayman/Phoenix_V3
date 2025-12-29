@@ -22,6 +22,10 @@ type PriceSourceDivergenceConfig struct {
 	// Default: 30s.
 	MaxStaleness time.Duration
 
+	// AlignMaxGap is the maximum allowed timestamp gap between sources to be considered "same-time".
+	// Default: 5s. If exceeded, we SKIP (approve with a "skip time_mismatch" reason) to avoid false rejects.
+	AlignMaxGap time.Duration
+
 	// SourceA/SourceB are the primary comparison keys in RiskContext.PriceSources.
 	// Default: onchain vs exchange.
 	SourceA string
@@ -38,6 +42,9 @@ func NewPriceSourceDivergenceRule(cfg PriceSourceDivergenceConfig) *PriceSourceD
 	}
 	if cfg.MaxStaleness <= 0 {
 		cfg.MaxStaleness = 30 * time.Second
+	}
+	if cfg.AlignMaxGap <= 0 {
+		cfg.AlignMaxGap = 5 * time.Second
 	}
 	if strings.TrimSpace(cfg.SourceA) == "" {
 		cfg.SourceA = "onchain"
@@ -112,6 +119,25 @@ func (r *PriceSourceDivergenceRule) Evaluate(_ contracts.Intent, ctx RiskContext
 			Reason: fmt.Sprintf(
 				"skip stale_source source_a=%s age_ms=%d source_b=%s age_ms=%d max_staleness_sec=%d",
 				aKey, aAgeMS, bKey, bAgeMS, int64(r.cfg.MaxStaleness/time.Second),
+			),
+		}
+	}
+
+	// Phase 5.7 (Path A): ensure the two prices are aligned in time before comparing.
+	alignGapMS := int64(r.cfg.AlignMaxGap / time.Millisecond)
+	tsGapMS := int64(0)
+	if a.TsMS >= b.TsMS {
+		tsGapMS = a.TsMS - b.TsMS
+	} else {
+		tsGapMS = b.TsMS - a.TsMS
+	}
+	if alignGapMS > 0 && tsGapMS > alignGapMS {
+		return RiskDecision{
+			Verdict: VerdictApprove,
+			RuleID:  PriceSourceDivergenceRuleID,
+			Reason: fmt.Sprintf(
+				"skip time_mismatch source_a=%s ts_a=%d age_ms=%d source_b=%s ts_b=%d age_ms=%d ts_gap_ms=%d align_max_gap_ms=%d",
+				aKey, a.TsMS, aAgeMS, bKey, b.TsMS, bAgeMS, tsGapMS, alignGapMS,
 			),
 		}
 	}
