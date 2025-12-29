@@ -307,6 +307,17 @@ func main() {
 		SourceA:         "onchain",
 		SourceB:         "exchange",
 	})
+
+	divSamplesJSON := strings.TrimSpace(os.Getenv("PHOENIX_DIVERGENCE_SAMPLES_JSON"))
+	divSamplesTXT := strings.TrimSpace(os.Getenv("PHOENIX_DIVERGENCE_SAMPLES_TXT"))
+	divCollector := riskcontrol.NewDivergenceRejectCollector(10, 10, runID, time.Now().UTC())
+	// Ensure the samples files exist (even if there are no REJECTs).
+	if divSamplesJSON != "" {
+		_ = divCollector.WriteJSON(divSamplesJSON, 100, time.Now().UTC())
+	}
+	if divSamplesTXT != "" {
+		_ = divCollector.WriteTXT(divSamplesTXT, 100, time.Now().UTC())
+	}
 	rcEval := riskcontrol.NewEvaluator(
 		riskcontrol.NewRiskModeHALTRule(),
 		riskcontrol.NewForceDryRunRule(),
@@ -321,7 +332,7 @@ func main() {
 		adapter = univ3.NewAdapter(cfg.Pools[0].PositionManager)
 	}
 
-	go startIntentExecutor(ctx, &cfgValue, intentQueue, rcEval, rcState, rcStats, cooldownRule, &onchainPriceValue, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer, v1w, &controlStateValue)
+	go startIntentExecutor(ctx, &cfgValue, intentQueue, rcEval, rcState, rcStats, cooldownRule, &onchainPriceValue, riskMgr, guard, chainGateway, store, eventStream, adapter, priceAgg, apiServer, v1w, &controlStateValue, divCollector, divSamplesJSON, divSamplesTXT, 100)
 	if chainGateway != nil {
 		go startReceiptWatcher(ctx, chainGateway.Receipts(), store)
 	}
@@ -1233,7 +1244,7 @@ func startPoolWatcher(ctx context.Context, uniState *dexstate.UniV3State, cfg *c
 	}()
 }
 
-func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, rcStats *riskcontrol.RiskStats, cooldownRule *riskcontrol.CooldownAndFrequencyRule, onchainPriceValue *atomic.Value, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
+func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *strategy.IntentQueue, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, rcStats *riskcontrol.RiskStats, cooldownRule *riskcontrol.CooldownAndFrequencyRule, onchainPriceValue *atomic.Value, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value, divCollector *riskcontrol.DivergenceRejectCollector, divSamplesJSON, divSamplesTXT string, divThresholdBps int64) {
 	go func() {
 		for {
 			intent := queue.Dequeue()
@@ -1250,12 +1261,12 @@ func startIntentExecutor(ctx context.Context, cfgValue *atomic.Value, queue *str
 				continue
 			}
 
-			executeIntent(ctx, cfgValue, intent, rcEval, rcState, rcStats, cooldownRule, onchainPriceValue, riskMgr, guard, gw, store, stream, adapter, market, apiServer, v1w, controlValue)
+			executeIntent(ctx, cfgValue, intent, rcEval, rcState, rcStats, cooldownRule, onchainPriceValue, riskMgr, guard, gw, store, stream, adapter, market, apiServer, v1w, controlValue, divCollector, divSamplesJSON, divSamplesTXT, divThresholdBps)
 		}
 	}()
 }
 
-func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, rcStats *riskcontrol.RiskStats, cooldownRule *riskcontrol.CooldownAndFrequencyRule, onchainPriceValue *atomic.Value, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value) {
+func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.Intent, rcEval *riskcontrol.Evaluator, rcState *riskcontrol.RiskStateStore, rcStats *riskcontrol.RiskStats, cooldownRule *riskcontrol.CooldownAndFrequencyRule, onchainPriceValue *atomic.Value, riskMgr *risk.Manager, guard *poolguard.Guard, gw gateway.Gateway, store *storage.Store, stream events.Stream, adapter *univ3.Adapter, market *feed.PriceAggregator, apiServer *api.Server, v1w *v1jsonl.Writer, controlValue *atomic.Value, divCollector *riskcontrol.DivergenceRejectCollector, divSamplesJSON, divSamplesTXT string, divThresholdBps int64) {
 	if intent.Metadata == nil {
 		intent.Metadata = make(map[string]string)
 	}
@@ -1400,6 +1411,17 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 					},
 					RuleReason: d.Reason,
 				})
+			}
+			// Phase 5.6: collect TopN reject samples for post-run diagnosis (no extra network requests).
+			if d.Verdict == riskcontrol.VerdictReject && divCollector != nil {
+				divCollector.ObserveReject(intent, rcCtx, d, divThresholdBps)
+				now := time.Now().UTC()
+				if divSamplesJSON != "" {
+					_ = divCollector.WriteJSON(divSamplesJSON, divThresholdBps, now)
+				}
+				if divSamplesTXT != "" {
+					_ = divCollector.WriteTXT(divSamplesTXT, divThresholdBps, now)
+				}
 			}
 			evLog := map[string]any{
 				"component":     "risk_control",

@@ -37,6 +37,8 @@ export PHOENIX_ALLOW_LIVE=0
 export ADMIN_TOKEN="$ADMIN_TOKEN"
 export RISK_STATE_PATH="$RISK_STATE_PATH"
 export RISK_STATS_PATH="$RISK_STATS_PATH"
+export PHOENIX_DIVERGENCE_SAMPLES_JSON="artifacts/phase5_6_divergence_reject_samples.json"
+export PHOENIX_DIVERGENCE_SAMPLES_TXT="artifacts/phase5_6_divergence_reject_samples.txt"
 
 if [ -z "${API_PORT}" ]; then
   API_PORT="$(python3 - <<'PY'
@@ -56,6 +58,8 @@ sed 's/^  port: [0-9]\\+/  port: 0/' configs/config.yaml >"$TMP_CFG"
 export PHOENIX_CONFIG="$TMP_CFG"
 
 : >"$BOT_LOG"
+: >"$PHOENIX_DIVERGENCE_SAMPLES_JSON" || true
+: >"$PHOENIX_DIVERGENCE_SAMPLES_TXT" || true
 
 echo "Phase 5.4 Risk Soak Retest (2h)" >"$OUT"
 echo "ts_utc=$(ts_utc)" >>"$OUT"
@@ -274,3 +278,6 @@ echo >>"$OUT"
 echo "wrote $OUT" >>"$OUT"
 echo "wrote $SUMMARY" >>"$OUT"
 
+echo >>"$OUT"
+echo "=== Phase 5.6 divergence samples (first 30 lines) ===" >>"$OUT"
+head -n 30 "$PHOENIX_DIVERGENCE_SAMPLES_TXT" >>"$OUT" 2>/dev/null || true

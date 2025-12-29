@@ -1,0 +1,96 @@
+Phase 5.6 Divergence Reject Samples Smoke
+ts_utc=2025-12-29T10:48:44Z
+
+=== RUN   TestPhase56DivergenceSamplesSmoke
+    phase5_6_divergence_samples_smoke_test.go:70: wrote ../../artifacts/phase5_6_divergence_reject_samples.json
+    phase5_6_divergence_samples_smoke_test.go:71: wrote ../../artifacts/phase5_6_divergence_reject_samples.txt
+--- PASS: TestPhase56DivergenceSamplesSmoke (0.00s)
+PASS
+ok  	phoenix-v3/internal/riskcontrol	0.010s
+
+=== samples.json head ===
+{
+  "run_id": "smoke-run",
+  "started_at": "2023-11-14T22:13:20Z",
+  "ended_at": "2023-11-14T22:13:30Z",
+  "threshold_bps": 100,
+  "samples_top_by_deviation": [
+    {
+      "ts_ms": 1700000000000,
+      "key": "phoenix|mock_rebalance|chain=11155111|pool=tusd-weth-005",
+      "intent_type": "mock_rebalance",
+      "chain_id": 11155111,
+      "pool_id": "tusd-weth-005",
+      "source_a_name": "onchain_tick",
+      "source_a_price_norm": 0.00031,
+      "source_a_ts_ms": 1699999998000,
+      "source_b_name": "price_aggregator",
+      "source_b_price_norm": 0.00033,
+      "source_b_ts_ms": 1699999999000,
+      "deviation_bps": 900,
+      "threshold_bps": 100,
+      "age_a_ms": 2000,
+      "age_b_ms": 1000,
+      "normalization_detail": "a:a:smoke | b:b:smoke"
+    },
+    {
+      "ts_ms": 1700000000000,
+      "key": "phoenix|mock_rebalance|chain=11155111|pool=tusd-weth-005",
+      "intent_type": "mock_rebalance",
+      "chain_id": 11155111,
+      "pool_id": "tusd-weth-005",
+      "source_a_name": "onchain_tick",
+      "source_a_price_norm": 0.00031,
+      "source_a_ts_ms": 1699999998000,
+      "source_b_name": "price_aggregator",
+      "source_b_price_norm": 0.00033,
+      "source_b_ts_ms": 1699999999000,
+      "deviation_bps": 700,
+      "threshold_bps": 100,
+      "age_a_ms": 2000,
+      "age_b_ms": 1000,
+      "normalization_detail": "a:a:smoke | b:b:smoke"
+    },
+    {
+      "ts_ms": 1700000000000,
+      "key": "phoenix|mock_rebalance|chain=11155111|pool=tusd-weth-005",
+      "intent_type": "mock_rebalance",
+      "chain_id": 11155111,
+      "pool_id": "tusd-weth-005",
+      "source_a_name": "onchain_tick",
+      "source_a_price_norm": 0.00031,
+      "source_a_ts_ms": 1699999998000,
+      "source_b_name": "price_aggregator",
+      "source_b_price_norm": 0.00033,
+      "source_b_ts_ms": 1699999999000,
+      "deviation_bps": 500,
+      "threshold_bps": 100,
+      "age_a_ms": 2000,
+      "age_b_ms": 1000,
+      "normalization_detail": "a:a:smoke | b:b:smoke"
+    }
+
+=== samples.txt head ===
+Phase 5.6 PriceSourceDivergence REJECT samples (TopN)
+run_id=smoke-run started_at=2023-11-14T22:13:20Z ended_at=2023-11-14T22:13:30Z threshold_bps=100
+
+deviation_bps=900 threshold_bps=100 key=phoenix|mock_rebalance|chain=11155111|pool=tusd-weth-005
+pool=tusd-weth-005 chain_id=11155111 intent_type=mock_rebalance
+onchain_norm=0.00031 ts_ms=1699999998000 age_ms=2000 name=onchain_tick
+exchange_norm=0.00033 ts_ms=1699999999000 age_ms=1000 name=price_aggregator
+normalization_detail=a:a:smoke | b:b:smoke
+diagnostic_hint=no_obvious_signal
+
+deviation_bps=700 threshold_bps=100 key=phoenix|mock_rebalance|chain=11155111|pool=tusd-weth-005
+pool=tusd-weth-005 chain_id=11155111 intent_type=mock_rebalance
+onchain_norm=0.00031 ts_ms=1699999998000 age_ms=2000 name=onchain_tick
+exchange_norm=0.00033 ts_ms=1699999999000 age_ms=1000 name=price_aggregator
+normalization_detail=a:a:smoke | b:b:smoke
+diagnostic_hint=no_obvious_signal
+
+deviation_bps=500 threshold_bps=100 key=phoenix|mock_rebalance|chain=11155111|pool=tusd-weth-005
+pool=tusd-weth-005 chain_id=11155111 intent_type=mock_rebalance
+onchain_norm=0.00031 ts_ms=1699999998000 age_ms=2000 name=onchain_tick
+exchange_norm=0.00033 ts_ms=1699999999000 age_ms=1000 name=price_aggregator
+normalization_detail=a:a:smoke | b:b:smoke
+diagnostic_hint=no_obvious_signal
