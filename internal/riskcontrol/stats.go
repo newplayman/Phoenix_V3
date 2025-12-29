@@ -36,6 +36,10 @@ type RiskStatsSnapshot struct {
 
 	CooldownRejectCountByKey map[string]int64 `json:"cooldown_reject_count_by_key"`
 
+	// Phase 5.8: top-level time_mismatch observability
+	TimeMismatchSkipCount int64   `json:"time_mismatch_skip_count"`
+	TimeMismatchSkipRate  float64 `json:"time_mismatch_skip_rate"`
+
 	PriceDivergence PriceDivergenceStats `json:"price_divergence_stats"`
 }
 
@@ -134,6 +138,13 @@ func (s *RiskStats) Snapshot(now time.Time) RiskStatsSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Phase 5.8: calculate time_mismatch statistics
+	timeMismatchCount := s.skipReasons["time_mismatch"]
+	timeMismatchRate := 0.0
+	if s.totalEvaluations > 0 {
+		timeMismatchRate = float64(timeMismatchCount) / float64(s.totalEvaluations)
+	}
+
 	out := RiskStatsSnapshot{
 		UpdatedAtMS:              now.UnixMilli(),
 		TotalEvaluations:         s.totalEvaluations,
@@ -143,6 +154,8 @@ func (s *RiskStats) Snapshot(now time.Time) RiskStatsSnapshot {
 		SkipCountsByRuleID:       copyMapI64(s.skipCountsByRuleID),
 		SkipReasons:              copyMapI64(s.skipReasons),
 		CooldownRejectCountByKey: copyMapI64(s.cooldownRejectCountByKey),
+		TimeMismatchSkipCount:    timeMismatchCount,
+		TimeMismatchSkipRate:     timeMismatchRate,
 	}
 
 	ps := PriceDivergenceStats{

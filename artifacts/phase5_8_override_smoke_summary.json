@@ -1,0 +1,18 @@
+{
+  "process_exit_code": 143,
+  "run_duration_sec": 99,
+  "sample_count": 6,
+  "threshold_bps_500_found_in_logs": false,
+  "threshold_bps_override_found_in_logs": false,
+  "time_mismatch_skip_count": 0,
+  "time_mismatch_skip_rate": 0,
+  "total_evaluations": 2,
+  "validation": {
+    "override_effective": false,
+    "time_mismatch_field_present": true
+  },
+  "verdict_counts": {
+    "REJECT": 1,
+    "SKIP": 1
+  }
+}

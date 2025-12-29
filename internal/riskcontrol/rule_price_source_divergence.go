@@ -3,6 +3,8 @@ package riskcontrol
 import (
 	"fmt"
 	"math"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +36,10 @@ type PriceSourceDivergenceConfig struct {
 
 type PriceSourceDivergenceRule struct {
 	cfg PriceSourceDivergenceConfig
+
+	// Phase 5.8: test-only threshold override tracking
+	thresholdBpsEffective int64
+	overrideUsed          bool
 }
 
 func NewPriceSourceDivergenceRule(cfg PriceSourceDivergenceConfig) *PriceSourceDivergenceRule {
@@ -52,7 +58,22 @@ func NewPriceSourceDivergenceRule(cfg PriceSourceDivergenceConfig) *PriceSourceD
 	if strings.TrimSpace(cfg.SourceB) == "" {
 		cfg.SourceB = "exchange"
 	}
-	return &PriceSourceDivergenceRule{cfg: cfg}
+
+	// Phase 5.8: test-only threshold override (does not change production default)
+	thresholdBps := cfg.MaxDeviationBps
+	overrideUsed := false
+	if overrideStr := strings.TrimSpace(os.Getenv("RISK_PRICE_DIVERGENCE_MAX_BPS_OVERRIDE")); overrideStr != "" {
+		if overrideVal, err := strconv.ParseInt(overrideStr, 10, 64); err == nil && overrideVal > 0 {
+			thresholdBps = overrideVal
+			overrideUsed = true
+		}
+	}
+
+	return &PriceSourceDivergenceRule{
+		cfg:                   cfg,
+		thresholdBpsEffective: thresholdBps,
+		overrideUsed:          overrideUsed,
+	}
 }
 
 func (r *PriceSourceDivergenceRule) RuleID() string { return PriceSourceDivergenceRuleID }
@@ -143,15 +164,15 @@ func (r *PriceSourceDivergenceRule) Evaluate(_ contracts.Intent, ctx RiskContext
 	}
 
 	devBps := deviationBps(aNorm, bNorm)
-	if devBps > r.cfg.MaxDeviationBps {
+	if devBps > r.thresholdBpsEffective {
 		return RiskDecision{
 			Verdict: VerdictReject,
 			RuleID:  PriceSourceDivergenceRuleID,
 			Reason: fmt.Sprintf(
-				"price divergence too high normalized_ok=true source_a=%s raw_price_a=%.10f normalized_price_a=%.10f ts_a=%d normalized_a_detail=%q source_b=%s raw_price_b=%.10f normalized_price_b=%.10f ts_b=%d normalized_b_detail=%q deviation_bps=%d threshold_bps=%d",
+				"price divergence too high normalized_ok=true source_a=%s raw_price_a=%.10f normalized_price_a=%.10f ts_a=%d normalized_a_detail=%q source_b=%s raw_price_b=%.10f normalized_price_b=%.10f ts_b=%d normalized_b_detail=%q deviation_bps=%d threshold_bps=%d override_used=%v",
 				aKey, a.RawPrice, aNorm, a.TsMS, strings.TrimSpace(a.NormalizationDetail),
 				bKey, b.RawPrice, bNorm, b.TsMS, strings.TrimSpace(b.NormalizationDetail),
-				devBps, r.cfg.MaxDeviationBps,
+				devBps, r.thresholdBpsEffective, r.overrideUsed,
 			),
 		}
 	}
@@ -160,8 +181,8 @@ func (r *PriceSourceDivergenceRule) Evaluate(_ contracts.Intent, ctx RiskContext
 		Verdict: VerdictApprove,
 		RuleID:  PriceSourceDivergenceRuleID,
 		Reason: fmt.Sprintf(
-			"ok normalized_ok=true source_a=%s source_b=%s deviation_bps=%d threshold_bps=%d",
-			aKey, bKey, devBps, r.cfg.MaxDeviationBps,
+			"ok normalized_ok=true source_a=%s source_b=%s deviation_bps=%d threshold_bps=%d override_used=%v",
+			aKey, bKey, devBps, r.thresholdBpsEffective, r.overrideUsed,
 		),
 	}
 }

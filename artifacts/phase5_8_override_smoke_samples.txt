@@ -1,0 +1,4 @@
+Phase 5.6 PriceSourceDivergence REJECT samples (TopN)
+run_id=phoenix-1767026423950434174 started_at=2025-12-29T16:40:23Z ended_at=2025-12-29T16:40:23Z threshold_bps=100
+
+no price_source_divergence REJECT samples recorded

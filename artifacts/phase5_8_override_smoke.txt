@@ -1,0 +1,129 @@
+Phase 5.8 Override Smoke Test
+ts_utc=2025-12-29T16:40:20Z
+duration_sec=90 sample_sec=15 api_port=46347
+override_threshold_bps=500
+
+[smoke] waiting for api...
+[smoke] api ready
+[smoke] enqueue bootstrap intents...
+[smoke] enqueue ok #1
+[smoke] enqueue ok #2
+[sample] ts_utc=2025-12-29T16:40:28Z total=2 reject=1 skip=1 time_mismatch_skip=0 tm_rate=0.0000
+[sample] ts_utc=2025-12-29T16:40:43Z total=2 reject=1 skip=1 time_mismatch_skip=0 tm_rate=0.0000
+[sample] ts_utc=2025-12-29T16:40:58Z total=2 reject=1 skip=1 time_mismatch_skip=0 tm_rate=0.0000
+[sample] ts_utc=2025-12-29T16:41:13Z total=2 reject=1 skip=1 time_mismatch_skip=0 tm_rate=0.0000
+[sample] ts_utc=2025-12-29T16:41:28Z total=2 reject=1 skip=1 time_mismatch_skip=0 tm_rate=0.0000
+[sample] ts_utc=2025-12-29T16:41:44Z total=2 reject=1 skip=1 time_mismatch_skip=0 tm_rate=0.0000
+artifacts/phase5_8_override_smoke_summary.json
+
+=== Phase 5.8 Smoke Test Validation ===
+time_mismatch_skip_count field present: True
+override threshold effective: False
+✗ SMOKE TEST FAILED
+
+=== bot log tail (100 lines) ===
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:57 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 [ContractV1] {"schema_version":"v1","run_id":"phoenix-1767026423950434174","ts_local_ms":1767026518987,"level":"SAFE","reasons":[],"fields":{},"cooldown_ms":0}
+2025/12/29 16:41:58 [Strategy] eval action=noop reason=below_threshold intents=0 agg_price=2931.167500 div_pct=0.000101
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:58 📊 Price updated: $2931.17
+2025/12/29 16:41:59 📊 Price updated: $2931.17
+2025/12/29 16:41:59 📊 Price updated: $2931.17
+2025/12/29 16:41:59 📊 Price updated: $2931.17
+2025/12/29 16:41:59 📊 Price updated: $2931.17
+2025/12/29 16:41:59 📊 Price updated: $2931.17
+=== bot stop 2025-12-29T16:41:59Z pgid=4047338 ===
+
+=== bot log override markers ===
+
+wrote artifacts/phase5_8_override_smoke.txt
+wrote artifacts/phase5_8_override_smoke_summary.json
