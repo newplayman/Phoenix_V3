@@ -14,6 +14,7 @@ tmp/
 .probe.*
 .short.*
 .tmp_*.log
+artifacts/phase5_4_risk_soak_retest_2h*
 
 # build outputs
 bin/
