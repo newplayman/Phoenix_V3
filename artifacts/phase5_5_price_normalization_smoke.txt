@@ -1,0 +1,10 @@
+Phase 5.5 Price Normalization Smoke
+ts_utc=2025-12-29T07:49:05Z
+
+=== RUN   TestPhase55PriceNormalizationSmoke
+    phase5_5_price_normalization_smoke_test.go:53: SCENARIO1_REJECT_OK: price divergence too high normalized_ok=true source_a=onchain raw_price_a=100.0000000000 normalized_price_a=100.0000000000 ts_a=1700000000000 normalized_a_detail="smoke normalized=true" source_b=exchange raw_price_b=110.0000000000 normalized_price_b=110.0000000000 ts_b=1700000000000 normalized_b_detail="smoke normalized=true" deviation_bps=1000 threshold_bps=100
+    phase5_5_price_normalization_smoke_test.go:86: SCENARIO2_SKIP_OK: skip missing_decimals_for_normalization source_a=onchain ok_a=false detail_a="missing_decimals_for_normalization" source_b=exchange ok_b=true detail_b="smoke normalized=true"
+    phase5_5_price_normalization_smoke_test.go:99: SCENARIO3_NORM_OK: exchange_norm=0.0003333333333333333 onchain_norm=0.0003139751557869017 detail=semantics=token1_per_token0 source=tick variant=tick_human direction_inverted=false dec0=6 dec1=18 decimals_ignored=true
+--- PASS: TestPhase55PriceNormalizationSmoke (0.00s)
+PASS
+ok  	phoenix-v3/internal/riskcontrol	0.004s

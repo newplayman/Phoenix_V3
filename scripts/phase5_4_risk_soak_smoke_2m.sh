@@ -65,27 +65,24 @@ echo >>"$OUT"
 
 START_TS="$(date +%s)"
 
-(
-  echo "=== bot start $(ts_utc) ==="
-  go run ./cmd/bot
-) >>"$BOT_LOG" 2>&1 &
+echo "=== bot start $(ts_utc) ===" >>"$BOT_LOG"
+# Run in its own process group so cleanup can reliably terminate both the go wrapper and the compiled child binary.
+setsid -w go run ./cmd/bot >>"$BOT_LOG" 2>&1 &
 BOT_PID="$!"
 
 cleanup() {
-  if kill -0 "$BOT_PID" >/dev/null 2>&1; then
-    echo "=== bot stop $(ts_utc) pid=$BOT_PID ===" >>"$BOT_LOG"
-    kill "$BOT_PID" >/dev/null 2>&1 || true
-    for _ in 1 2 3 4 5; do
-      if ! kill -0 "$BOT_PID" >/dev/null 2>&1; then
-        break
-      fi
-      sleep 1
-    done
-    if kill -0 "$BOT_PID" >/dev/null 2>&1; then
-      echo "=== bot SIGKILL $(ts_utc) pid=$BOT_PID ===" >>"$BOT_LOG"
-      kill -9 "$BOT_PID" >/dev/null 2>&1 || true
+  [ -n "${BOT_PID:-}" ] || return 0
+
+  echo "=== bot stop $(ts_utc) pgid=$BOT_PID ===" >>"$BOT_LOG"
+  kill -TERM -- "-$BOT_PID" >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! pgrep -g "$BOT_PID" >/dev/null 2>&1; then
+      return 0
     fi
-  fi
+    sleep 1
+  done
+  echo "=== bot SIGKILL $(ts_utc) pgid=$BOT_PID ===" >>"$BOT_LOG"
+  kill -KILL -- "-$BOT_PID" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -237,7 +234,11 @@ echo "=== bot log tail (200 lines) ===" >>"$OUT"
 tail -n 200 "$BOT_LOG" >>"$OUT" || true
 echo >>"$OUT"
 echo "=== bot log highlights (risk_control / executor) ===" >>"$OUT"
-rg -n "risk_control|IntentExecutor\\]|ExecutorResultV1" "$BOT_LOG" | tail -n 200 >>"$OUT" || true
+if command -v rg >/dev/null 2>&1; then
+  rg -n "risk_control|IntentExecutor\\]|ExecutorResultV1" "$BOT_LOG" | tail -n 200 >>"$OUT" || true
+else
+  grep -nE "risk_control|IntentExecutor\\]|ExecutorResultV1" "$BOT_LOG" | tail -n 200 >>"$OUT" || true
+fi
 echo >>"$OUT"
 echo "wrote $OUT" >>"$OUT"
 echo "wrote $SUMMARY" >>"$OUT"

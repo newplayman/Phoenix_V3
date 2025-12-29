@@ -63,18 +63,38 @@ func (r *PriceSourceDivergenceRule) Evaluate(_ contracts.Intent, ctx RiskContext
 
 	a, aOK := ctx.PriceSources[aKey]
 	b, bOK := ctx.PriceSources[bKey]
-	if !aOK || !bOK || a.Price <= 0 || b.Price <= 0 || a.TsMS <= 0 || b.TsMS <= 0 {
+	if !aOK || !bOK || a.TsMS <= 0 || b.TsMS <= 0 {
 		miss := []string{}
-		if !aOK || a.Price <= 0 || a.TsMS <= 0 {
+		if !aOK || a.TsMS <= 0 {
 			miss = append(miss, aKey)
 		}
-		if !bOK || b.Price <= 0 || b.TsMS <= 0 {
+		if !bOK || b.TsMS <= 0 {
 			miss = append(miss, bKey)
 		}
 		return RiskDecision{
 			Verdict: VerdictApprove,
 			RuleID:  PriceSourceDivergenceRuleID,
 			Reason:  "skip missing_source=" + strings.Join(miss, ","),
+		}
+	}
+
+	// Phase 5.5: normalization gate. If either source cannot be normalized safely, SKIP to avoid bogus REJECT.
+	aNorm := a.NormalizedPrice
+	if aNorm <= 0 {
+		aNorm = a.Price
+	}
+	bNorm := b.NormalizedPrice
+	if bNorm <= 0 {
+		bNorm = b.Price
+	}
+	if !a.NormalizationOK || !b.NormalizationOK || aNorm <= 0 || bNorm <= 0 {
+		return RiskDecision{
+			Verdict: VerdictApprove,
+			RuleID:  PriceSourceDivergenceRuleID,
+			Reason: fmt.Sprintf(
+				"skip missing_decimals_for_normalization source_a=%s ok_a=%v detail_a=%q source_b=%s ok_b=%v detail_b=%q",
+				aKey, a.NormalizationOK, strings.TrimSpace(a.NormalizationDetail), bKey, b.NormalizationOK, strings.TrimSpace(b.NormalizationDetail),
+			),
 		}
 	}
 
@@ -96,14 +116,16 @@ func (r *PriceSourceDivergenceRule) Evaluate(_ contracts.Intent, ctx RiskContext
 		}
 	}
 
-	devBps := deviationBps(a.Price, b.Price)
+	devBps := deviationBps(aNorm, bNorm)
 	if devBps > r.cfg.MaxDeviationBps {
 		return RiskDecision{
 			Verdict: VerdictReject,
 			RuleID:  PriceSourceDivergenceRuleID,
 			Reason: fmt.Sprintf(
-				"price divergence too high source_a=%s price_a=%.10f ts_a=%d source_b=%s price_b=%.10f ts_b=%d deviation_bps=%d threshold_bps=%d",
-				aKey, a.Price, a.TsMS, bKey, b.Price, b.TsMS, devBps, r.cfg.MaxDeviationBps,
+				"price divergence too high normalized_ok=true source_a=%s raw_price_a=%.10f normalized_price_a=%.10f ts_a=%d normalized_a_detail=%q source_b=%s raw_price_b=%.10f normalized_price_b=%.10f ts_b=%d normalized_b_detail=%q deviation_bps=%d threshold_bps=%d",
+				aKey, a.RawPrice, aNorm, a.TsMS, strings.TrimSpace(a.NormalizationDetail),
+				bKey, b.RawPrice, bNorm, b.TsMS, strings.TrimSpace(b.NormalizationDetail),
+				devBps, r.cfg.MaxDeviationBps,
 			),
 		}
 	}
@@ -112,7 +134,7 @@ func (r *PriceSourceDivergenceRule) Evaluate(_ contracts.Intent, ctx RiskContext
 		Verdict: VerdictApprove,
 		RuleID:  PriceSourceDivergenceRuleID,
 		Reason: fmt.Sprintf(
-			"ok source_a=%s source_b=%s deviation_bps=%d threshold_bps=%d",
+			"ok normalized_ok=true source_a=%s source_b=%s deviation_bps=%d threshold_bps=%d",
 			aKey, bKey, devBps, r.cfg.MaxDeviationBps,
 		),
 	}

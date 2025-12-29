@@ -99,15 +99,21 @@ type PriceDivergenceCheckSummary struct {
 	Verdict    string    `json:"verdict"` // APPROVE|REJECT (SKIP is encoded via SkipReason)
 	SkipReason string    `json:"skip_reason,omitempty"`
 
-	SourceA string  `json:"source_a"`
-	PriceA  float64 `json:"price_a"`
-	TsAMS   int64   `json:"ts_a_ms"`
-
-	SourceB string  `json:"source_b"`
-	PriceB  float64 `json:"price_b"`
-	TsBMS   int64   `json:"ts_b_ms"`
+	NormalizedOK bool                     `json:"normalized_ok"`
+	SourceA      PriceDivergenceCheckSide `json:"source_a"`
+	SourceB      PriceDivergenceCheckSide `json:"source_b"`
 
 	RuleReason string `json:"rule_reason"`
+}
+
+type PriceDivergenceCheckSide struct {
+	Key                 string  `json:"key"`
+	Name                string  `json:"name"`
+	RawPrice            float64 `json:"raw_price"`
+	NormalizedPrice     float64 `json:"normalized_price"`
+	TsMS                int64   `json:"ts_ms"`
+	NormalizationOK     bool    `json:"normalization_ok"`
+	NormalizationDetail string  `json:"normalization_detail,omitempty"`
 }
 
 type GateStatus struct {

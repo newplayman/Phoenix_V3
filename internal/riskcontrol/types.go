@@ -70,8 +70,27 @@ type RiskContext struct {
 
 type PricePoint struct {
 	SourceName string
-	Price      float64
-	TsMS       int64
+
+	// RawPrice is the best-effort raw value as produced by the source before any Phase 5.5 normalization.
+	// It is used for observability only and MUST NOT be used for comparisons unless NormalizationOK is true.
+	RawPrice float64
+
+	// Price is the Phase 5.5 comparable price in the unified semantics (token1 per token0, human units).
+	// Kept for backwards compatibility; prefer NormalizedPrice for clarity.
+	Price float64
+
+	// NormalizedPrice is the comparable price in the unified semantics:
+	// normalized_price = token1 per 1 token0 (human units).
+	NormalizedPrice float64
+
+	// NormalizationOK indicates whether NormalizedPrice is safe to compare.
+	// If false, PriceSourceDivergenceRule should SKIP instead of rejecting on bogus deviations.
+	NormalizationOK bool
+
+	// NormalizationDetail is a compact, stable string describing direction/decimals used.
+	NormalizationDetail string
+
+	TsMS int64
 }
 
 type SystemHealth struct {

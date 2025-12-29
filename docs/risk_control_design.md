@@ -85,6 +85,13 @@ Phoenix_V3 新决策链顺序（接口与注释层面确定）：
 - 数据来源（同一时刻的多源快照，规则不发起任何网络请求）：
   - `exchange`：来自 `PriceAggregator.Snapshot().Aggregate.AggPrice` / `AggUpdatedAt`
   - `onchain`：来自本进程监听到的池子 tick 推导价格（`tickToDexPrice(...)`）的最近一次值与时间戳
+- Phase 5.5（Normalization）：统一价格语义，避免单位/方向不一致导致的天文偏差
+  - 统一语义（固定）：`normalized_price = token1 per 1 token0`（人类单位）
+  - `exchange`：
+    - 当前 `AggPrice` 在 Phoenix V3 中约定为 `token0 per token1`（例如 stable per WETH），因此需要取倒数得到 `token1 per token0`
+  - `onchain`（tick → price）：
+    - 标准路径（Uniswap V3 raw ratio）：`raw_ratio = 1.0001^tick`，再做 decimals 归一：`human_ratio(token1/token0) = raw_ratio * 10^(dec0-dec1)`
+    - 保护性降级：若 decimals 缺失或 tick/decimals 语义无法对齐（会产生天文偏差），规则应 **SKIP**（`missing_decimals_for_normalization`）而不是误拒绝
 - 阈值含义：
   - `max_deviation_bps`（默认 100 bps = 1.00%）：两来源相对偏差超过阈值则拒绝
   - `max_staleness_sec`（默认 30s）：任一来源快照超过该时间视为 stale

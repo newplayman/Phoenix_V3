@@ -393,7 +393,14 @@ func main() {
 			if dexPrice > 0 {
 				currentDexPrice = dexPrice
 				dexPriceReady.Store(true)
-				onchainPriceValue.Store(pricePoint{Source: "onchain_tick", Price: dexPrice, Ts: time.Now().UTC()})
+				onchainPriceValue.Store(pricePoint{
+					Source: "onchain_tick",
+					Price:  dexPrice,
+					Tick:   state.CurrentTick,
+					Dec0:   token0Decimals,
+					Dec1:   token1Decimals,
+					Ts:     time.Now().UTC(),
+				})
 			}
 			log.Printf("[DEX] Pool %s tick=%d liquidity=%s dexPrice=%.2f", state.PoolAddress, state.CurrentTick, state.Liquidity, currentDexPrice)
 			currentPoolTick = state.CurrentTick
@@ -713,6 +720,9 @@ type pnlBaselineFile struct {
 type pricePoint struct {
 	Source string
 	Price  float64
+	Tick   int64
+	Dec0   int
+	Dec1   int
 	Ts     time.Time
 }
 
@@ -1297,19 +1307,35 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 		}
 		priceSources := map[string]riskcontrol.PricePoint{}
 		if mSnap.Aggregate.AggPrice > 0 && !mSnap.Aggregate.AggUpdatedAt.IsZero() {
+			// Phase 5.5: normalize to token1_per_token0 (human units). The in-process aggregator is treated as
+			// token0_per_token1 (e.g. stable-per-WETH), so we invert to align semantics.
+			exNorm := riskcontrol.NormalizeExchangePriceToken1PerToken0(mSnap.Aggregate.AggPrice)
 			priceSources["exchange"] = riskcontrol.PricePoint{
-				SourceName: "price_aggregator",
-				Price:      mSnap.Aggregate.AggPrice,
-				TsMS:       mSnap.Aggregate.AggUpdatedAt.UnixMilli(),
+				SourceName:          "price_aggregator",
+				RawPrice:            exNorm.RawPrice,
+				Price:               exNorm.NormalizedPrice,
+				NormalizedPrice:     exNorm.NormalizedPrice,
+				NormalizationOK:     exNorm.NormalizationOK,
+				NormalizationDetail: exNorm.NormalizationDetail,
+				TsMS:                mSnap.Aggregate.AggUpdatedAt.UnixMilli(),
 			}
 		}
 		if onchainPriceValue != nil {
 			if v := onchainPriceValue.Load(); v != nil {
 				if pp, ok := v.(pricePoint); ok && pp.Price > 0 && !pp.Ts.IsZero() {
+					ref := 0.0
+					if ex, ok := priceSources["exchange"]; ok && ex.NormalizedPrice > 0 {
+						ref = ex.NormalizedPrice
+					}
+					onNorm := riskcontrol.NormalizeOnchainTickToken1PerToken0(pp.Tick, pp.Dec0, pp.Dec1, pp.Price, ref)
 					priceSources["onchain"] = riskcontrol.PricePoint{
-						SourceName: pp.Source,
-						Price:      pp.Price,
-						TsMS:       pp.Ts.UnixMilli(),
+						SourceName:          pp.Source,
+						RawPrice:            onNorm.RawPrice,
+						Price:               onNorm.NormalizedPrice,
+						NormalizedPrice:     onNorm.NormalizedPrice,
+						NormalizationOK:     onNorm.NormalizationOK,
+						NormalizationDetail: onNorm.NormalizationDetail,
+						TsMS:                pp.Ts.UnixMilli(),
 					}
 				}
 			}
@@ -1350,25 +1376,55 @@ func executeIntent(ctx context.Context, cfgValue *atomic.Value, intent strategy.
 			}
 			if apiServer != nil {
 				apiServer.UpdateLastPriceDivergenceCheck(api.PriceDivergenceCheckSummary{
-					At:         time.Now(),
-					Verdict:    verdict,
-					SkipReason: skipReason,
-					SourceA:    "onchain",
-					PriceA:     a.Price,
-					TsAMS:      a.TsMS,
-					SourceB:    "exchange",
-					PriceB:     b.Price,
-					TsBMS:      b.TsMS,
+					At:           time.Now(),
+					Verdict:      verdict,
+					SkipReason:   skipReason,
+					NormalizedOK: a.NormalizationOK && b.NormalizationOK,
+					SourceA: api.PriceDivergenceCheckSide{
+						Key:                 "onchain",
+						Name:                a.SourceName,
+						RawPrice:            a.RawPrice,
+						NormalizedPrice:     a.NormalizedPrice,
+						TsMS:                a.TsMS,
+						NormalizationOK:     a.NormalizationOK,
+						NormalizationDetail: a.NormalizationDetail,
+					},
+					SourceB: api.PriceDivergenceCheckSide{
+						Key:                 "exchange",
+						Name:                b.SourceName,
+						RawPrice:            b.RawPrice,
+						NormalizedPrice:     b.NormalizedPrice,
+						TsMS:                b.TsMS,
+						NormalizationOK:     b.NormalizationOK,
+						NormalizationDetail: b.NormalizationDetail,
+					},
 					RuleReason: d.Reason,
 				})
 			}
 			evLog := map[string]any{
-				"component": "risk_control",
-				"rule_id":   riskcontrol.PriceSourceDivergenceRuleID,
-				"verdict":   d.Verdict,
-				"reason":    d.Reason,
-				"source_a":  map[string]any{"name": a.SourceName, "price": a.Price, "ts_ms": a.TsMS},
-				"source_b":  map[string]any{"name": b.SourceName, "price": b.Price, "ts_ms": b.TsMS},
+				"component":     "risk_control",
+				"rule_id":       riskcontrol.PriceSourceDivergenceRuleID,
+				"verdict":       d.Verdict,
+				"reason":        d.Reason,
+				"normalized_ok": a.NormalizationOK && b.NormalizationOK,
+				"source_a": map[string]any{
+					"key":                  "onchain",
+					"name":                 a.SourceName,
+					"raw_price":            a.RawPrice,
+					"normalized_price":     a.NormalizedPrice,
+					"ts_ms":                a.TsMS,
+					"normalization_ok":     a.NormalizationOK,
+					"normalization_detail": a.NormalizationDetail,
+				},
+				"source_b": map[string]any{
+					"key":                  "exchange",
+					"name":                 b.SourceName,
+					"raw_price":            b.RawPrice,
+					"normalized_price":     b.NormalizedPrice,
+					"ts_ms":                b.TsMS,
+					"normalization_ok":     b.NormalizationOK,
+					"normalization_detail": b.NormalizationDetail,
+				},
 			}
 			if bb, err := json.Marshal(evLog); err == nil {
 				if d.Verdict == riskcontrol.VerdictReject {

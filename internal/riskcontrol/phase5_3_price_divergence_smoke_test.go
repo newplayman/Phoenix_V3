@@ -24,8 +24,24 @@ func TestPhase53PriceDivergenceSmoke(t *testing.T) {
 	ctxOK := RiskContext{
 		Now: now,
 		PriceSources: map[string]PricePoint{
-			"onchain":  {SourceName: "onchain_tick", Price: 100.00, TsMS: now.UnixMilli()},
-			"exchange": {SourceName: "price_aggregator", Price: 100.50, TsMS: now.UnixMilli()},
+			"onchain": {
+				SourceName:          "onchain_tick",
+				RawPrice:            100.00,
+				Price:               100.00,
+				NormalizedPrice:     100.00,
+				NormalizationOK:     true,
+				NormalizationDetail: "smoke",
+				TsMS:                now.UnixMilli(),
+			},
+			"exchange": {
+				SourceName:          "price_aggregator",
+				RawPrice:            100.50,
+				Price:               100.50,
+				NormalizedPrice:     100.50,
+				NormalizationOK:     true,
+				NormalizationDetail: "smoke",
+				TsMS:                now.UnixMilli(),
+			},
 		},
 	}
 	d1 := rule.Evaluate(intent, ctxOK)
@@ -38,8 +54,24 @@ func TestPhase53PriceDivergenceSmoke(t *testing.T) {
 	ctxBad := RiskContext{
 		Now: now,
 		PriceSources: map[string]PricePoint{
-			"onchain":  {SourceName: "onchain_tick", Price: 100.00, TsMS: now.UnixMilli()},
-			"exchange": {SourceName: "price_aggregator", Price: 110.00, TsMS: now.UnixMilli()},
+			"onchain": {
+				SourceName:          "onchain_tick",
+				RawPrice:            100.00,
+				Price:               100.00,
+				NormalizedPrice:     100.00,
+				NormalizationOK:     true,
+				NormalizationDetail: "smoke",
+				TsMS:                now.UnixMilli(),
+			},
+			"exchange": {
+				SourceName:          "price_aggregator",
+				RawPrice:            110.00,
+				Price:               110.00,
+				NormalizedPrice:     110.00,
+				NormalizationOK:     true,
+				NormalizationDetail: "smoke",
+				TsMS:                now.UnixMilli(),
+			},
 		},
 	}
 	d2 := rule.Evaluate(intent, ctxBad)
@@ -55,7 +87,15 @@ func TestPhase53PriceDivergenceSmoke(t *testing.T) {
 	ctxMissing := RiskContext{
 		Now: now,
 		PriceSources: map[string]PricePoint{
-			"exchange": {SourceName: "price_aggregator", Price: 100.00, TsMS: now.UnixMilli()},
+			"exchange": {
+				SourceName:          "price_aggregator",
+				RawPrice:            100.00,
+				Price:               100.00,
+				NormalizedPrice:     100.00,
+				NormalizationOK:     true,
+				NormalizationDetail: "smoke",
+				TsMS:                now.UnixMilli(),
+			},
 		},
 	}
 	d3 := rule.Evaluate(intent, ctxMissing)
@@ -69,8 +109,24 @@ func TestPhase53PriceDivergenceSmoke(t *testing.T) {
 	ctxStale := RiskContext{
 		Now: now,
 		PriceSources: map[string]PricePoint{
-			"onchain":  {SourceName: "onchain_tick", Price: 100.00, TsMS: staleTs},
-			"exchange": {SourceName: "price_aggregator", Price: 100.00, TsMS: now.UnixMilli()},
+			"onchain": {
+				SourceName:          "onchain_tick",
+				RawPrice:            100.00,
+				Price:               100.00,
+				NormalizedPrice:     100.00,
+				NormalizationOK:     true,
+				NormalizationDetail: "smoke",
+				TsMS:                staleTs,
+			},
+			"exchange": {
+				SourceName:          "price_aggregator",
+				RawPrice:            100.00,
+				Price:               100.00,
+				NormalizedPrice:     100.00,
+				NormalizationOK:     true,
+				NormalizationDetail: "smoke",
+				TsMS:                now.UnixMilli(),
+			},
 		},
 	}
 	d4 := rule.Evaluate(intent, ctxStale)

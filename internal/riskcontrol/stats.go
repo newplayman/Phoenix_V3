@@ -247,6 +247,8 @@ func skipReasonKind(reason string) string {
 	switch {
 	case strings.Contains(r, "missing_source"):
 		return "missing_source"
+	case strings.Contains(r, "missing_decimals_for_normalization"):
+		return "missing_decimals_for_normalization"
 	case strings.Contains(r, "stale_source"):
 		return "stale_source"
 	default:
