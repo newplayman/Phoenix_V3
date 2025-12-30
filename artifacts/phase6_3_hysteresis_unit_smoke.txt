@@ -1,0 +1,4 @@
+# phoenix-v3/internal/advisory
+internal/advisory/state_test.go:16:1: expected operand, found ':'
+FAIL	phoenix-v3/internal/advisory [setup failed]
+FAIL
