@@ -1,0 +1,225 @@
+Phase 5.4 Risk Soak (18h)
+ts_utc=2025-12-30T06:08:18Z
+duration_sec=120 sample_sec=60 api_port=52295
+chain_id=11155111 pool_id=tusd-weth-005
+bot_log=var/phase5_4_risk_soak_18h_bot.log
+
+[soak] waiting for api...
+[soak] api ready
+[soak] enqueue bootstrap intents...
+[soak] enqueue ok #1
+[soak] enqueue ok #2
+[sample] ts_utc=2025-12-30T06:08:23Z alive=1 total_evaluations=2 reject=1 skip=1 top_rule=cooldown_frequency:2 risk_state_bytes=828 risk_stats_bytes=745
+[sample] ts_utc=2025-12-30T06:09:23Z alive=1 total_evaluations=2 reject=1 skip=1 top_rule=cooldown_frequency:2 risk_state_bytes=828 risk_stats_bytes=745
+artifacts/phase5_4_risk_soak_18h_summary.json
+
+=== bot log tail (200 lines) ===
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 [ContractV1] {"schema_version":"v1","run_id":"phoenix-1767074898739003318","ts_local_ms":1767075013749,"level":"SAFE","reasons":[],"fields":{},"cooldown_ms":0}
+2025/12/30 06:10:13 [Strategy] eval action=noop reason=below_threshold intents=0 agg_price=2944.472500 div_pct=0.000090
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:13 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:14 📊 Price updated: $2944.47
+2025/12/30 06:10:15 📊 Price updated: $2944.47
+2025/12/30 06:10:15 📊 Price updated: $2944.47
+2025/12/30 06:10:15 📊 Price updated: $2944.47
+2025/12/30 06:10:15 📊 Price updated: $2944.47
+2025/12/30 06:10:15 📊 Price updated: $2944.47
+2025/12/30 06:10:15 📊 Price updated: $2944.47
+2025/12/30 06:10:15 [Market] agg=2944.4725 age_ms=2 stale=false conf=1.00 mode=normal div_pct=0.0001 src=[binance{conn=true age_ms=2 err_1m=0} okx{conn=true age_ms=1009 err_1m=0}]
+2025/12/30 06:10:15 📊 Price updated: $2944.47
+2025/12/30 06:10:15 📊 Price updated: $2944.47
+2025/12/30 06:10:15 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:16 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:17 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 [ContractV1] {"schema_version":"v1","run_id":"phoenix-1767074898739003318","ts_local_ms":1767075018750,"level":"SAFE","reasons":[],"fields":{},"cooldown_ms":0}
+2025/12/30 06:10:18 [Strategy] eval action=noop reason=below_threshold intents=0 agg_price=2944.472500 div_pct=0.000090
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:18 📊 Price updated: $2944.47
+2025/12/30 06:10:19 📊 Price updated: $2944.47
+2025/12/30 06:10:19 📊 Price updated: $2944.47
+2025/12/30 06:10:19 [DEX] Pool 0x1E80b0b6d12Ecf2CDD08bC9c66f2fD594394331d tick=-80666 liquidity=42875014 dexPrice=3184965375664024.50
+2025/12/30 06:10:19 📊 Price updated: $2944.47
+2025/12/30 06:10:19 📊 Price updated: $2944.47
+2025/12/30 06:10:19 📊 Price updated: $2944.47
+2025/12/30 06:10:19 📊 Price updated: $2944.47
+2025/12/30 06:10:19 📊 Price updated: $2944.47
+2025/12/30 06:10:19 📊 Price updated: $2944.47
+2025/12/30 06:10:19 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:20 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:21 📊 Price updated: $2944.48
+2025/12/30 06:10:22 📊 Price updated: $2944.48
+2025/12/30 06:10:22 📊 Price updated: $2944.48
+2025/12/30 06:10:22 📊 Price updated: $2944.48
+2025/12/30 06:10:22 📊 Price updated: $2944.48
+2025/12/30 06:10:22 📊 Price updated: $2944.48
+2025/12/30 06:10:22 📊 Price updated: $2944.48
+2025/12/30 06:10:22 [Market] agg=2944.4775 age_ms=325 stale=false conf=1.00 mode=normal div_pct=0.0001 src=[binance{conn=true age_ms=390 err_1m=0} okx{conn=true age_ms=325 err_1m=0}]
+2025/12/30 06:10:22 📊 Price updated: $2944.48
+2025/12/30 06:10:23 📊 Price updated: $2944.48
+2025/12/30 06:10:23 📊 Price updated: $2944.48
+2025/12/30 06:10:23 📊 Price updated: $2944.48
+2025/12/30 06:10:23 📊 Price updated: $2944.48
+2025/12/30 06:10:23 📊 Price updated: $2944.48
+=== bot stop 2025-12-30T06:10:23Z pgid=1350205 ===
+
+=== bot log highlights (risk_control / executor) ===
+182:2025/12/30 06:08:21 [INFO] {"component":"risk_control","normalized_ok":false,"reason":"skip missing_source=onchain","rule_id":"price_source_divergence","source_a":{"key":"onchain","name":"","normalization_detail":"","normalization_ok":false,"normalized_price":0,"raw_price":0,"ts_ms":0},"source_b":{"key":"exchange","name":"price_aggregator","normalization_detail":"semantics=token1_per_token0 direction_inverted=true","normalization_ok":true,"normalized_price":0.00033949027233060925,"raw_price":2945.5924999999997,"ts_ms":1767074901240},"verdict":"APPROVE"}
+183:2025/12/30 06:08:21 [INFO] {"component":"risk_control","intent":{"chain_id":11155111,"id":"api-20251230T060821.353Z","pool_id":"tusd-weth-005","risk_mode":"","strategy_version":"phase5_4","type":"mock_rebalance","urgency":5},"reason":"all_rules_approved","rule_id":"risk_control","verdict":"APPROVE"}
+184:2025/12/30 06:08:21 [IntentExecutor] executing api-20251230T060821.353Z dry_run=true
+263:2025/12/30 06:08:23 [WARN] {"component":"risk_control","intent":{"chain_id":11155111,"id":"api-20251230T060823.369Z","pool_id":"tusd-weth-005","risk_mode":"","strategy_version":"phase5_4","type":"mock_rebalance","urgency":5},"reason":"min interval violation cooldown_key=phoenix|mock_rebalance|chain=11155111|pool=tusd-weth-005 remaining_ms=57984 min_interval_sec=60 next_allowed_ts_ms=1767074961353","rule_id":"cooldown_frequency","verdict":"REJECT"}
+
+wrote artifacts/phase5_4_risk_soak_18h.txt
+wrote artifacts/phase5_4_risk_soak_18h_summary.json

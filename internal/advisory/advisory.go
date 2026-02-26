@@ -1,11 +1,17 @@
 package advisory
 
 import (
+	"fmt"
 	"time"
+
+	"phoenix-v3/internal/riskcontrol"
 )
 
+// StatsSnapshot is the input snapshot used to generate a risk advisory.
+type StatsSnapshot = riskcontrol.RiskStatsSnapshot
+
 // RiskAdvisory represents a read-only recommendation for the control plane.
-// Phase 6.0: This NEVER writes to control.json, only outputs recommendations.
+// Phase 6+: This MUST NOT write to control.json; it only outputs recommendations.
 type RiskAdvisory struct {
 	TsMS              int64            `json:"ts_ms"`
 	WindowSec         int64            `json:"window_sec"`
@@ -14,148 +20,157 @@ type RiskAdvisory struct {
 	Reasons           []string         `json:"reasons"`
 	Evidence          AdvisoryEvidence `json:"evidence"`
 
-	// Phase 6.3: Hysteresis and severity
-	StateSinceMs     int64            `json:"state_since_ts_ms"`
-	InstantaneousMode string          `json:"instantaneous_mode"`
-	SeverityScore    int              `json:"severity_score"`
-	HysteresisCounts map[string]int   `json:"hysteresis_counts,omitempty"`
-	Notes             string           `json:"notes,omitempty"`
+	// Phase 6.3+: Hysteresis and severity
+	StateSinceMs      int64          `json:"state_since_ts_ms"`
+	InstantaneousMode string         `json:"instantaneous_mode"`
+	SeverityScore     int            `json:"severity_score"`
+	HysteresisCounts  map[string]int `json:"hysteresis_counts,omitempty"`
+	Notes             string         `json:"notes,omitempty"`
 }
 
 // AdvisoryEvidence contains the statistical evidence supporting the advisory.
 type AdvisoryEvidence struct {
-	TotalEvaluations     int64    `json:"total_evaluations"`
-	RejectRate           float64  `json:"reject_rate"`
-	SkipRate             float64  `json:"skip_rate"`
-	TimeMismatchSkipRate float64  `json:"time_mismatch_skip_rate"`
-	DivergenceRejectRate float64  `json:"divergence_reject_rate"`
-	CooldownRejectRate   float64  `json:"cooldown_reject_rate"`
-	MaxDeviationBps      int64    `json:"max_deviation_bps"`
-	P95DeviationBps      int64    `json:"p95_deviation_bps,omitempty"`
-	TopKeys              []string `json:"top_keys,omitempty"`
+	TotalEvaluations     int64   `json:"total_evaluations"`
+	RejectRate           float64 `json:"reject_rate"`
+	SkipRate             float64 `json:"skip_rate"`
+	TimeMismatchSkipRate float64 `json:"time_mismatch_skip_rate"`
+	DivergenceRejectRate float64 `json:"divergence_reject_rate"`
+	CooldownRejectRate   float64 `json:"cooldown_reject_rate"`
+	MaxDeviationBps      int64   `json:"max_deviation_bps"`
+	P95DeviationBps      int64   `json:"p95_deviation_bps,omitempty"`
 }
 
-// Advisory suggestion constants
+// Advisory suggestion constants.
 const (
 	SuggestionNoChange = "NO_CHANGE"
 	SuggestionSafe     = "SAFE"
 	SuggestionHalt     = "HALT"
 )
 
+func buildEvidence(stats StatsSnapshot) AdvisoryEvidence {
+	total := stats.TotalEvaluations
+	if total <= 0 {
+		total = 1
+	}
 
-// computeInstantaneousMode calculates the instantaneous advisory mode without hysteresis
+	get := func(m map[string]int64, k string) int64 {
+		if m == nil {
+			return 0
+		}
+		return m[k]
+	}
 
-// buildReasons generates explainable reasons for the advisory
-func buildReasons(instantaneousMode, stableMode string, evidence AdvisoryEvidence, stats StatsSnapshot, cfg AdvisoryConfig) ([]string, float64) {
-reasons := []string{}
-confidence := 0.5
+	rejectN := get(stats.VerdictCounts, "REJECT")
+	skipN := get(stats.VerdictCounts, "SKIP")
 
-// Instantaneous conditions
-if instantaneousMode == SuggestionHalt {
-ce.DivergenceRejectRate >= cfg.HaltDivergenceRejectRate {
-s = append(reasons, formatReasonF("divergence_reject_rate=%.2f >= threshold %.2f", 
-ce.DivergenceRejectRate, cfg.HaltDivergenceRejectRate))
-fidence += 0.2
-ce.MaxDeviationBps >= cfg.HaltMinDeviationBps {
-s = append(reasons, formatReasonF("max_deviation_bps=%d >= threshold %d",
-ce.MaxDeviationBps, cfg.HaltMinDeviationBps))
-fidence += 0.2
-ce.CooldownRejectRate >= cfg.HaltCooldownRejectRate {
-s = append(reasons, formatReasonF("cooldown_reject_rate=%.2f >= threshold %.2f",
-ce.CooldownRejectRate, cfg.HaltCooldownRejectRate))
-fidence += 0.2
-if instantaneousMode == SuggestionSafe {
-ce.TimeMismatchSkipRate >= cfg.SafeTimeMismatchSkipRate {
-s = append(reasons, formatReasonF("time_mismatch_skip_rate=%.2f >= threshold %.2f",
-ce.TimeMismatchSkipRate, cfg.SafeTimeMismatchSkipRate))
-fidence += 0.15
-ce.MissingNormSkipRate >= cfg.SafeMissingNormSkipRate {
-s = append(reasons, formatReasonF("missing_norm_skip_rate=%.2f >= threshold %.2f",
-ce.MissingNormSkipRate, cfg.SafeMissingNormSkipRate))
-fidence += 0.15
-{
-s = append(reasons, "no risk conditions triggered, system operating normally")
+	divReject := get(stats.RejectCountsByRuleID, riskcontrol.PriceSourceDivergenceRuleID)
+	cooldownReject := get(stats.RejectCountsByRuleID, riskcontrol.CooldownAndFrequencyRuleID)
+
+	return AdvisoryEvidence{
+		TotalEvaluations:     stats.TotalEvaluations,
+		RejectRate:           float64(rejectN) / float64(total),
+		SkipRate:             float64(skipN) / float64(total),
+		TimeMismatchSkipRate: stats.TimeMismatchSkipRate,
+		DivergenceRejectRate: float64(divReject) / float64(total),
+		CooldownRejectRate:   float64(cooldownReject) / float64(total),
+		MaxDeviationBps:      stats.PriceDivergence.MaxDeviationBps,
+		P95DeviationBps:      stats.PriceDivergence.P95DeviationBps,
+	}
 }
 
-// Sample size contribution
-if evidence.TotalEvaluations >= 100 {
-fidence += 0.1
+func computeInstantaneousMode(cfg AdvisoryConfig, evidence AdvisoryEvidence) string {
+	if evidence.TotalEvaluations >= cfg.HaltMinEvaluations {
+		if evidence.DivergenceRejectRate >= cfg.HaltDivergenceRejectRate && evidence.MaxDeviationBps >= cfg.HaltMinDeviationBps {
+			return SuggestionHalt
+		}
+		if evidence.CooldownRejectRate >= cfg.HaltCooldownRejectRate {
+			return SuggestionHalt
+		}
+	}
+
+	if evidence.TotalEvaluations >= cfg.SafeMinEvaluations {
+		if evidence.TimeMismatchSkipRate >= cfg.SafeTimeMismatchSkipRate {
+			return SuggestionSafe
+		}
+	}
+
+	return SuggestionNoChange
 }
 
-if confidence > 1.0 {
-fidence = 1.0
+func buildReasons(instantaneousMode, stableMode string, evidence AdvisoryEvidence, cfg AdvisoryConfig) ([]string, float64) {
+	reasons := []string{}
+	confidence := 0.50
+
+	switch instantaneousMode {
+	case SuggestionHalt:
+		if evidence.DivergenceRejectRate >= cfg.HaltDivergenceRejectRate {
+			reasons = append(reasons, fmt.Sprintf("divergence_reject_rate=%.4f >= %.4f", evidence.DivergenceRejectRate, cfg.HaltDivergenceRejectRate))
+			confidence += 0.20
+		}
+		if evidence.MaxDeviationBps >= cfg.HaltMinDeviationBps {
+			reasons = append(reasons, fmt.Sprintf("max_deviation_bps=%d >= %d", evidence.MaxDeviationBps, cfg.HaltMinDeviationBps))
+			confidence += 0.20
+		}
+		if evidence.CooldownRejectRate >= cfg.HaltCooldownRejectRate {
+			reasons = append(reasons, fmt.Sprintf("cooldown_reject_rate=%.4f >= %.4f", evidence.CooldownRejectRate, cfg.HaltCooldownRejectRate))
+			confidence += 0.20
+		}
+	case SuggestionSafe:
+		if evidence.TimeMismatchSkipRate >= cfg.SafeTimeMismatchSkipRate {
+			reasons = append(reasons, fmt.Sprintf("time_mismatch_skip_rate=%.4f >= %.4f", evidence.TimeMismatchSkipRate, cfg.SafeTimeMismatchSkipRate))
+			confidence += 0.15
+		}
+	default:
+		reasons = append(reasons, "no risk conditions triggered, system operating normally")
+	}
+
+	if evidence.TotalEvaluations >= 100 {
+		confidence += 0.10
+	}
+	if confidence > 1.0 {
+		confidence = 1.0
+	}
+
+	if instantaneousMode != stableMode {
+		reasons = append(reasons, fmt.Sprintf("stable_mode=%s (instantaneous=%s)", stableMode, instantaneousMode))
+	}
+
+	return reasons, confidence
 }
-
-return reasons, confidence
-}
-
-
-func computeInstantaneousMode(cfg AdvisoryConfig, evidence AdvisoryEvidence, stats StatsSnapshot) string {
-// HALT conditions (Phase 6.0 logic preserved)
-if evidence.TotalEvaluations >= cfg.HaltMinEvaluations {
-ce.DivergenceRejectRate >= cfg.HaltDivergenceRejectRate && evidence.MaxDeviationBps >= cfg.HaltMinDeviationBps {
- SuggestionHalt
-ce.CooldownRejectRate >= cfg.HaltCooldownRejectRate {
- SuggestionHalt
-conditions
-if evidence.TotalEvaluations >= cfg.SafeMinEvaluations {
-ce.TimeMismatchSkipRate >= cfg.SafeTimeMismatchSkipRate {
- SuggestionSafe
-ce.MissingNormSkipRate >= cfg.SafeMissingNormSkipRate {
- SuggestionSafe
- SuggestionNoChange
-}
-
-
 
 // GenerateAdvisory creates a risk advisory from risk statistics.
-// This is the core decision logic for Phase 6.0.
 func GenerateAdvisory(cfg AdvisoryConfig, stats StatsSnapshot, now time.Time, stateManager *AdvisoryStateManager) RiskAdvisory {
 	evidence := buildEvidence(stats)
+	instantaneousMode := computeInstantaneousMode(cfg, evidence)
 
-	// Phase 6.3: Compute instantaneous mode (Phase 6.0 logic)
-	instantaneousMode := computeInstantaneousMode(cfg, evidence, stats)
-
-	// Phase 6.3: Apply hysteresis if state manager available
-	var stableMode string
-	var hysteresisReason string
-	var stateSinceMs int64
+	stableMode := instantaneousMode
+	hysteresisReason := "hysteresis: disabled (no state manager)"
+	stateSinceMs := now.UnixMilli()
 	var hysteresisCounts map[string]int
-	
+
 	if stateManager != nil {
 		stableMode, hysteresisReason = stateManager.UpdateState(instantaneousMode, cfg, now)
 		state := stateManager.GetState()
 		stateSinceMs = state.StateSinceMs
 		hysteresisCounts = state.ConsecutiveTriggerCount
-	} else {
-		// Fallback: no hysteresis
-		stableMode = instantaneousMode
-		hysteresisReason = "hysteresis: disabled (no state manager)"
-		stateSinceMs = now.UnixMilli()
 	}
 
-
-	// Determine suggestion and reasons
-	// Phase 6.3: Use stable mode from hysteresis
-	suggestion := stableMode
-	reasons, confidence := buildReasons(instantaneousMode, stableMode, evidence, stats, cfg)
+	reasons, confidence := buildReasons(instantaneousMode, stableMode, evidence, cfg)
 	reasons = append(reasons, hysteresisReason)
 
-
-	// Phase 6.3: Calculate severity score
 	severityScore, severityReason := CalculateSeverityScore(instantaneousMode, evidence)
 	reasons = append(reasons, severityReason)
 
 	return RiskAdvisory{
 		TsMS:              now.UnixMilli(),
 		WindowSec:         cfg.WindowSec,
-		SuggestedRiskMode: suggestion,
+		SuggestedRiskMode: stableMode,
 		Confidence:        confidence,
 		Reasons:           reasons,
 		Evidence:          evidence,
-
-		// Phase 6.3: Hysteresis and severity
 		StateSinceMs:      stateSinceMs,
 		InstantaneousMode: instantaneousMode,
 		SeverityScore:     severityScore,
 		HysteresisCounts:  hysteresisCounts,
+	}
+}

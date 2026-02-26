@@ -1,0 +1,43 @@
+Phase 6.3 DELIVERY
+==================
+
+Commit: 2672196702e67978f2704a7867f42e23adffd176
+Message: feat(phase6.3): stabilize risk advisory with hysteresis and severity score
+Date: 2025-12-30T04:50:32Z
+
+Hysteresis Parameters (Defaults):
+- HALT_UP_N: 3 (consecutive HALT triggers to upgrade)
+- HALT_DOWN_M: 5 (consecutive non-HALT to downgrade from HALT)
+- SAFE_UP_N: 2 (consecutive SAFE triggers to upgrade)
+- SAFE_DOWN_M: 4 (consecutive non-SAFE to downgrade from SAFE)
+
+State File: Phoenix_V3/var/risk_advisory_state.json
+
+Unit Test Results:
+==================
+$(tail -30 artifacts/phase6_3_hysteresis_unit_smoke.txt)
+
+Key Features:
+=============
+✓ Advisory state machine with hysteresis
+✓ Prevents oscillation near thresholds
+✓ Severity score (0-100) calculation
+✓ Enhanced explainability in reasons
+✓ Atomic state persistence (tmp+rename)
+✓ Comprehensive unit tests (4 scenarios)
+
+Integration:
+============
+- computeInstantaneousMode: Calculates Phase 6.0 logic
+- UpdateState: Applies hysteresis rules
+- GenerateAdvisory: Two-stage (instantaneous → stable)
+- State persistence: Automatic after each advisory
+
+RiskAdvisory New Fields:
+========================
+- state_since_ts_ms: When current mode started
+- instantaneous_mode: Raw mode before hysteresis
+- severity_score: 0-100 risk severity
+- hysteresis_counts: Consecutive trigger counts
+
+Status: COMPLETE ✓

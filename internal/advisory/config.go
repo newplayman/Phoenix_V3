@@ -11,6 +11,12 @@ type AdvisoryConfig struct {
 	Enabled   bool
 	WindowSec int64 // Default: 3600 (1 hour)
 
+	// Phase 6.3: Hysteresis parameters.
+	HaltUpN   int
+	HaltDownM int
+	SafeUpN   int
+	SafeDownM int
+
 	// HALT thresholds (high risk)
 	HaltDivergenceRejectRate float64 // Default: 0.80
 	HaltMinEvaluations       int64   // Default: 20
@@ -28,6 +34,12 @@ func NewAdvisoryConfig() AdvisoryConfig {
 	cfg := AdvisoryConfig{
 		Enabled:   true,
 		WindowSec: 3600,
+
+		// Hysteresis defaults (conservative)
+		HaltUpN:   3,
+		HaltDownM: 5,
+		SafeUpN:   2,
+		SafeDownM: 4,
 
 		// HALT defaults (conservative)
 		HaltDivergenceRejectRate: 0.80,
